@@ -31,6 +31,7 @@ build-backend = "hatchling.build"
 # Packages that make up the application. Each one is importable after `uv sync`.
 packages = [
     "subsetting_sdk",
+    "genesys_sdk",
     "document_processing",
     "tools",
     "prompts",
