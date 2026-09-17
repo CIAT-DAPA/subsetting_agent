@@ -5,7 +5,8 @@ An AI agent that helps genebank users (curators, breeders, researchers) build
 information, always in this order:
 
 1. **Passport data** — identification and collecting-site data of accessions,
-   from the [Genesys PGR](https://www.genesys-pgr.org) REST API.
+   from the [Genesys PGR](https://www.genesys-pgr.org) REST API **or from a
+   spreadsheet the user uploads** (Excel/CSV with accession ids and coordinates).
 2. **Traits** — characterization and evaluation data (descriptors and
    observations), also from Genesys.
 3. **Scientific documents** — PDFs uploaded by the user, converted to Markdown
@@ -18,9 +19,10 @@ information, always in this order:
 The agent is served through a Gradio chat interface and follows the same
 tool-calling loop as the AClimate "Melisa" agent (litellm + local LLM).
 
-> **Status:** all blocks are implemented and unit-tested (184 tests, no
-> network): SDKs, document processing, tools, system prompt, agent and Gradio
-> app. Next: validation against the real Genesys sandbox with an API token.
+> **Status:** all blocks are implemented and unit-tested (214 tests, no
+> network): SDKs, document processing, accession spreadsheets, tools, system
+> prompt, agent and Gradio app. Next: validation against the real Genesys
+> sandbox with an API token.
 
 ---
 
@@ -40,7 +42,10 @@ subsetting_agent/
 │   ├── client.py               #   SubsettingClient (8 endpoints, typed)
 │   ├── models.py               #   IndicatorFilter, ClusterRequest/Result, ...
 │   ├── catalog.py              #   IndicatorCatalog: names -> indicator period ids
+│   ├── grid.py                 #   GridSpec: lat/lon -> cellid (raster_base grid)
 │   └── exceptions.py
+├── accession_files/            # User spreadsheets with accession ids + coordinates
+│   └── reader.py               #   read_accession_file: column detection, validation, cellid
 ├── document_processing/        # PDF -> Markdown -> searchable sections
 │   ├── pdf_converter.py        #   convert_pdf_to_markdown (cached on disk)
 │   ├── document_store.py       #   DocumentStore: sections, outline, lexical search
@@ -48,7 +53,8 @@ subsetting_agent/
 ├── tools/                      # Tools exposed to the LLM + session state
 │   ├── accession_context.py    #   AccessionContext: selection, stage, steps, clusters (JSON)
 │   ├── services.py             #   ToolServices: clients, document store, context, catalog
-│   ├── genesys_tools.py        #   passport + trait tools
+│   ├── genesys_tools.py        #   passport + trait tools (Genesys mode)
+│   ├── file_tools.py           #   spreadsheet loading tools (file mode)
 │   ├── document_tools.py       #   document tools
 │   ├── subsetting_tools.py     #   climate tools + describe_selection
 │   └── registry.py             #   ToolRegistry: OpenAI schemas, validation, dispatch
@@ -58,10 +64,28 @@ subsetting_agent/
 └── .env.example
 ```
 
+### Two accession sources
+
+The source is decided **at the start of every turn, deterministically**, from
+the files attached in the conversation:
+
+| Situation | Mode | Stage 1 | Traits | Documents | Climate |
+|---|---|---|---|---|---|
+| No spreadsheet attached | **Genesys mode** | passport filters on the Genesys API | yes | yes | yes |
+| An Excel/CSV with accession ids + coordinates attached | **File mode** | load the spreadsheet; `cellid` computed locally with the Subsetting grid | no (the file has no trait data) | yes | yes |
+
+In file mode no Genesys client is created and the Genesys tools are not even
+registered, so the model cannot call them. The spreadsheet reader detects the
+identifier, latitude and longitude columns (and an optional crop column) from
+common header names; the user can name the columns explicitly when detection
+fails. Rows with missing/invalid coordinates, outside the indicator grid, or
+duplicated ids are reported and skipped.
+
 ### How the pieces fit together
 
 ```
  user request ──► passport filter ──► Genesys /acn/list ──► accessions (+ cellid)
+        or    ──► spreadsheet (id, lat, lon) ──► grid.cellid() ──► accessions (+ cellid)
                                                                    │
                         traits? ──► Genesys /acn/{uuid}/observations ──► reduced selection
                                                                    │
@@ -109,7 +133,9 @@ ollama pull llama3.1:8b        # or point SUBSETTING_AGENT_MODEL/API_BASE to ano
 uv run python app.py           # http://localhost:7860
 ```
 
-The chat accepts text and PDF attachments. Every PDF attached during the
+The chat accepts text, PDF attachments and one accession spreadsheet
+(`.xlsx`, `.xls`, `.csv`, `.tsv`). Attaching a spreadsheet switches the whole
+conversation to file mode (see *Two accession sources*). Every PDF attached during the
 conversation stays available to the agent (converted once and cached). The
 accession selection persists across turns inside the browser session; opening
 a new tab starts a fresh conversation. Nothing is shared between users.
@@ -122,6 +148,8 @@ Example requests:
   September, and keep the driest cluster."
 - (attach a paper) "Which of the selected accessions does this paper report as
   heat tolerant?"
+- (attach `my_accessions.xlsx`) "Cluster my accessions by drought indicators and
+  keep the two driest groups."
 
 ---
 
@@ -137,6 +165,7 @@ app). Defaults are shown in `.env.example`.
 | `GENESYS_API_TIMEOUT` | `60` | Per-request timeout in seconds |
 | `GENESYS_CELLID_FIELD` | `geo.tileIndex` | Dotted path of the accession field used as Subsetting `cellid` (alternative: `tileIndex3min`) |
 | `GENESYS_MAX_ACCESSIONS` | `2000` | Maximum accessions fetched for one passport filter |
+| `SUBSETTING_GRID_NCOLS` / `_NROWS` / `_XMIN` / `_YMIN` / `_CELLSIZE` | `7198` / `2000` / `-180` / `-50` / `0.05` | Grid used to compute `cellid` from spreadsheet coordinates |
 | `SUBSETTING_API_URL` | `https://sandbox.genesys-pgr.org/api/subsetting` | Root URL of the Subsetting API |
 | `SUBSETTING_API_PREFIX` | `/api/v1` | Route prefix; set empty if the proxy strips it |
 | `SUBSETTING_API_TIMEOUT` | `120` | Per-request timeout (clustering can be slow) |
@@ -257,7 +286,8 @@ to ~1500 characters so that a small local model can consume search hits.
 
 ### Tools exposed to the LLM
 
-The registry (`tools.build_registry()`) defines 14 tools, grouped by stage.
+The registry (`tools.build_registry(source)`) defines 16 tools, grouped by stage;
+`source` is `"genesys"` or `"file"` and selects which stage-1 tools are exposed.
 Every tool receives a `ToolServices` object (clients, document store and the
 session `AccessionContext`) and returns a compact JSON-serializable result;
 failures become `{"error": ...}` so the model can recover.
@@ -267,6 +297,7 @@ failures become `{"error": ...}` so the model can recover.
 | Passport | `search_crops` | Resolve crop names to Genesys crop codes |
 | Passport | `preview_accessions` | Count matches and show a breakdown, without loading |
 | Passport | `select_accessions` | Load georeferenced accessions and start the selection |
+| Passport (file mode) | `list_accession_files`, `load_accessions_from_file` | Read the user's spreadsheet, compute cellids, start the selection |
 | Traits | `search_trait_descriptors` | Find descriptors by keyword and crop |
 | Traits | `filter_selection_by_trait` | Keep accessions whose observations satisfy a condition |
 | Documents | `list_documents`, `search_documents`, `read_document_section` | Explore uploaded PDFs |
@@ -358,6 +389,10 @@ Conventions used across the code base:
   It is enforced by the agent's system prompt and by the data flow: climate
   tools only receive the cellids of the accessions that survived the previous
   stages.
+- **File mode computes `cellid` locally.** `subsetting_sdk/grid.py` reproduces
+  R `raster::cellFromXY` on the `raster_base.asc` grid (0.05°, 7198 × 2000,
+  origin −180/−50, 1-based row-major from the north-west corner). If the
+  deployed raster differs, override it with the `SUBSETTING_GRID_*` variables.
 - **Traits are per accession.** Genesys exposes observations only through
   `/acn/{uuid}/observations`, not as a list filter. The trait stage therefore
   runs over a bounded selection (`GENESYS_MAX_ACCESSIONS`); the agent may need

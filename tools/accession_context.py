@@ -127,6 +127,10 @@ class AccessionContext:
         clusters: Result of the last climate clustering: label -> cellids.
         cluster_algorithm: Algorithm of the last clustering.
         selected_cluster: Cluster label chosen by the user, if any.
+        source: Where the accessions come from: ``genesys`` (API) or ``file``
+            (spreadsheet uploaded by the user). Decided at the start of the
+            conversation and kept for its whole duration.
+        source_file: Name of the accession file, in file mode.
     """
 
     accessions: dict[str, AccessionRecord] = field(default_factory=dict)
@@ -137,6 +141,8 @@ class AccessionContext:
     clusters: dict[str, list[int]] = field(default_factory=dict)
     cluster_algorithm: str | None = None
     selected_cluster: str | None = None
+    source: str = "genesys"
+    source_file: str | None = None
 
     # ------------------------------------------------------------------ #
     # Queries
@@ -244,7 +250,55 @@ class AccessionContext:
             total_matching: Total matching accessions on the server.
             description: Plain-words description of the query.
         """
-        self.accessions = {a.uuid: AccessionRecord.from_accession(a) for a in accessions}
+        self._start_selection(
+            {a.uuid: AccessionRecord.from_accession(a) for a in accessions},
+            passport_filter=passport_filter,
+            total_matching=total_matching,
+            description=description,
+        )
+        self.source = "genesys"
+        self.source_file = None
+
+    def set_file_selection(
+        self,
+        records: list[AccessionRecord],
+        *,
+        file_name: str,
+        description: str,
+    ) -> None:
+        """Start a new selection from a user-provided accession file.
+
+        Args:
+            records: Accessions read from the file, with their cellid computed.
+            file_name: Name of the file, kept for traceability.
+            description: Plain-words description of what was loaded.
+        """
+        self._start_selection(
+            {record.uuid: record for record in records},
+            passport_filter={"source_file": file_name},
+            total_matching=len(records),
+            description=description,
+        )
+        self.source = "file"
+        self.source_file = file_name
+
+    def _start_selection(
+        self,
+        records: dict[str, AccessionRecord],
+        *,
+        passport_filter: dict[str, Any],
+        total_matching: int,
+        description: str,
+    ) -> None:
+        """Replace the whole state with a fresh passport-stage selection.
+
+        Args:
+            records: Accessions keyed by identifier.
+            passport_filter: Serialized description of the source query/file.
+            total_matching: Total accessions available at the source.
+            description: Plain-words description of the step.
+        """
+        self.accessions = records
         self.passport_filter = passport_filter
         self.total_matching = total_matching
         self.stage = Stage.PASSPORT
@@ -318,6 +372,8 @@ class AccessionContext:
             sample: Number of example accessions to include.
         """
         return {
+            "source": self.source,
+            "source_file": self.source_file,
             "stage": self.stage.value,
             "accession_count": self.count,
             "with_coordinates": len(self.with_cellid()),
@@ -343,6 +399,8 @@ class AccessionContext:
             "clusters": self.clusters,
             "cluster_algorithm": self.cluster_algorithm,
             "selected_cluster": self.selected_cluster,
+            "source": self.source,
+            "source_file": self.source_file,
         }
 
         return json.dumps(payload, ensure_ascii=False)
@@ -367,6 +425,8 @@ class AccessionContext:
             clusters={k: list(v) for k, v in payload.get("clusters", {}).items()},
             cluster_algorithm=payload.get("cluster_algorithm"),
             selected_cluster=payload.get("selected_cluster"),
+            source=payload.get("source", "genesys"),
+            source_file=payload.get("source_file"),
         )
 
         # Records are rebuilt in the stored order to keep sampling stable.

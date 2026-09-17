@@ -13,6 +13,8 @@ dependencies = [
     "pymupdf4llm>=0.0.17",
     "gradio>=5.0",
     "python-dotenv>=1.0",
+    "pandas>=2.3.3",
+    "openpyxl>=3.1.5",
 ]
 
 [dependency-groups]
@@ -30,6 +32,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 # Packages that make up the application. Each one is importable after `uv sync`.
 packages = [
+    "accession_files",
     "subsetting_sdk",
     "genesys_sdk",
     "document_processing",

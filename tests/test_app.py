@@ -10,6 +10,7 @@ import app as app_module
 from app import (
     build_memory_from_history,
     chat,
+    collect_accession_file_paths,
     collect_pdf_paths,
     extract_file_paths,
     extract_text,
@@ -92,6 +93,16 @@ class TestHistoryHelpers:
 
         assert paths == ["/old.pdf", "/new.pdf"]
 
+    def test_collect_accession_file_paths(self) -> None:
+        """Spreadsheets are separated from PDFs, whatever the turn they came in."""
+        history = [{"role": "user", "content": {"path": "/old.csv"}}]
+
+        assert collect_accession_file_paths(history, ["/new.pdf", "/list.XLSX"]) == [
+            "/old.csv",
+            "/list.XLSX",
+        ]
+        assert collect_pdf_paths(history, ["/new.pdf", "/list.XLSX"]) == ["/new.pdf"]
+
     def test_format_document_errors(self) -> None:
         """Errors render as a note; no errors render as nothing."""
         assert format_document_errors([]) == ""
@@ -114,10 +125,14 @@ class TestChatHandler:
                 """Accept any configuration."""
                 self.memory = []
 
-            async def chat(self, text, *, document_paths, context_json):
+            async def chat(self, text, *, document_paths, accession_file_paths, context_json):
                 """Record inputs and return a scripted turn."""
                 captured.update(
-                    text=text, memory=self.memory, documents=document_paths, context=context_json
+                    text=text,
+                    memory=self.memory,
+                    documents=document_paths,
+                    accession_files=accession_file_paths,
+                    context=context_json,
                 )
                 return SimpleNamespace(
                     answer="done", context_json='{"stage": "passport"}', document_errors=["bad.pdf"]
@@ -130,13 +145,16 @@ class TestChatHandler:
             {"role": "user", "content": {"path": "/paper.pdf"}},
         ]
 
-        answer, state = await chat({"text": "now", "files": ["/new.pdf"]}, history, "{}")
+        answer, state = await chat(
+            {"text": "now", "files": ["/new.pdf", "/list.xlsx"]}, history, "{}"
+        )
 
         assert answer.startswith("done")
         assert "bad.pdf" in answer
         assert state == '{"stage": "passport"}'
         assert captured["text"] == "now"
         assert captured["documents"] == ["/paper.pdf", "/new.pdf"]
+        assert captured["accession_files"] == ["/list.xlsx"]
         assert captured["context"] == "{}"
         assert [m["content"] for m in captured["memory"]] == ["earlier", "ok"]
 

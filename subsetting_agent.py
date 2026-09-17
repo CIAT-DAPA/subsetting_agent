@@ -27,7 +27,7 @@ from prompts.system_prompt import build_system_prompt
 from subsetting_sdk.client import SubsettingClient
 from tools.accession_context import AccessionContext
 from tools.registry import ToolRegistry, build_registry
-from tools.services import ToolServices
+from tools.services import SOURCE_FILE, SOURCE_GENESYS, ToolServices
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +118,10 @@ class SubsettingAgent:
             max_tokens: Maximum tokens per LLM answer.
             temperature: Sampling temperature.
             num_ctx: Context window requested from Ollama.
-            registry: Tool registry; the default registry when ``None``.
+            registry: Tool registry; when ``None`` the registry matching the
+                accession source of each turn is built automatically.
             services: Pre-built services (tests); when ``None`` they are created
-                per turn from the environment.
+                per turn from the environment and the uploaded files.
             document_cache_dir: Cache directory for PDF conversions.
         """
         self.model = model or os.getenv("SUBSETTING_AGENT_MODEL", DEFAULT_MODEL)
@@ -129,7 +130,7 @@ class SubsettingAgent:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.num_ctx = num_ctx
-        self.registry = registry or build_registry()
+        self._registry = registry
         self._services = services
         self.document_cache_dir = document_cache_dir
 
@@ -148,13 +149,20 @@ class SubsettingAgent:
         user_message: str,
         *,
         document_paths: list[str | Path] | None = None,
+        accession_file_paths: list[str | Path] | None = None,
         context_json: str | None = None,
     ) -> AgentTurn:
         """Process one user message through the LLM and the tools.
 
+        The accession source is decided here, deterministically: when the user
+        uploaded an accession spreadsheet the turn runs in file mode (no Genesys
+        client, file tools registered); otherwise it runs in Genesys mode.
+
         Args:
             user_message: Text written by the user.
             document_paths: PDFs attached in this conversation (all turns).
+            accession_file_paths: Excel/CSV accession lists attached in this
+                conversation (all turns).
             context_json: Serialized selection from the previous turn.
 
         Returns:
@@ -168,17 +176,21 @@ class SubsettingAgent:
                 context_json=context_json or AccessionContext().to_json(),
             )
 
-        services = self._services or self._build_services()
+        accession_files = [Path(path) for path in accession_file_paths or []]
+        services = self._services or self._build_services(accession_files)
         services.context = AccessionContext.from_json(context_json)
         document_errors = self._load_documents(services, document_paths or [])
+
+        # The registry and prompt follow the source; an injected registry wins (tests).
+        registry = self._registry or build_registry(services.source)
+        system_prompt = build_system_prompt(registry.describe(), services.source)
 
         self.memory.append(
             {"role": "user", "content": self._annotate_message(user_message, services)}
         )
-        system_prompt = build_system_prompt(self.registry.describe())
 
         try:
-            answer = await self._run_agent_loop(services, system_prompt)
+            answer = await self._run_agent_loop(services, registry, system_prompt)
 
         finally:
             # Services built for this turn own their HTTP clients; injected ones don't.
@@ -196,12 +208,21 @@ class SubsettingAgent:
     # Setup helpers
     # ------------------------------------------------------------------ #
 
-    def _build_services(self) -> ToolServices:
-        """Create the API clients and document store for one turn from the environment."""
+    def _build_services(self, accession_files: list[Path]) -> ToolServices:
+        """Create the clients and stores for one turn from the environment.
+
+        Args:
+            accession_files: Spreadsheets uploaded by the user; a non-empty list
+                switches the turn to file mode and skips the Genesys client.
+        """
+        # In file mode no Genesys client is created: the API is not contacted at all.
+        genesys = None if accession_files else GenesysClient()
+
         return ToolServices(
-            genesys=GenesysClient(),
+            genesys=genesys,
             subsetting=SubsettingClient(),
             documents=DocumentStore(self.document_cache_dir),
+            accession_files=accession_files,
         )
 
     @staticmethod
@@ -234,6 +255,14 @@ class SubsettingAgent:
         notes = []
         context = services.context
 
+        # Name the source so the model never tries the other one.
+        if services.source == SOURCE_FILE:
+            names = ", ".join(path.name for path in services.accession_files[:3])
+            notes.append(f"[accession source: spreadsheet ({names}); Genesys is disabled]")
+
+        elif services.source == SOURCE_GENESYS:
+            notes.append("[accession source: Genesys API]")
+
         # Tell the model about an existing selection so it continues instead of restarting.
         if not context.is_empty:
             notes.append(
@@ -254,11 +283,14 @@ class SubsettingAgent:
     # Agent loop
     # ------------------------------------------------------------------ #
 
-    async def _run_agent_loop(self, services: ToolServices, system_prompt: dict[str, str]) -> str:
+    async def _run_agent_loop(
+        self, services: ToolServices, registry: ToolRegistry, system_prompt: dict[str, str]
+    ) -> str:
         """Alternate LLM calls and tool executions until a final answer is produced.
 
         Args:
             services: Services of the turn.
+            registry: Tools available in this turn.
             system_prompt: System message.
         """
         # (tool + normalized arguments) -> result already obtained in this turn
@@ -266,7 +298,7 @@ class SubsettingAgent:
 
         # consecutive iterations without any new tool call
         stalled_iterations = 0
-        tools = self.registry.openai_tools()
+        tools = registry.openai_tools()
 
         # Each iteration is one LLM call followed by the tool calls it requested.
         for iteration in range(1, self.max_iterations + 1):
@@ -334,7 +366,7 @@ class SubsettingAgent:
 
                 else:
                     logger.info("Executing tool %s with %s", tool_name, tool_arguments)
-                    result = await self.registry.execute(services, tool_name, tool_arguments)
+                    result = await registry.execute(services, tool_name, tool_arguments)
                     executed_calls[call_key] = result
                     made_progress = True
 

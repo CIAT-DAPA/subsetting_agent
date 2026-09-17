@@ -114,13 +114,24 @@ def make_agent(
 class TestSystemPrompt:
     """The prompt encodes the business order and the tool list."""
 
-    def test_prompt_contains_stages_in_order(self) -> None:
-        """Passport comes before traits, documents and climate."""
-        text = SYSTEM_PROMPT_TEMPLATE
+    def test_genesys_prompt_contains_stages_in_order(self) -> None:
+        """Passport comes before traits, documents and climate in Genesys mode."""
+        text = build_system_prompt("- tools", "genesys")["content"]
 
+        assert "GENESYS PGR API" in text
         assert text.index("Stage 1 - PASSPORT") < text.index("Stage 2 - TRAITS")
         assert text.index("Stage 2 - TRAITS") < text.index("Stage 3 - DOCUMENTS")
         assert text.index("Stage 3 - DOCUMENTS") < text.index("Stage 4 - CLIMATE")
+
+    def test_file_prompt_replaces_passport_and_disables_traits(self) -> None:
+        """File mode loads the spreadsheet first and has no trait stage."""
+        text = build_system_prompt("- tools", "file")["content"]
+
+        assert "SPREADSHEET" in text
+        assert "Do NOT search Genesys" in text
+        assert "Stage 1 - LOAD THE ACCESSION FILE" in text
+        assert "Not available in file mode" in text
+        assert "select_accessions with the agreed criteria" not in text
 
     def test_build_system_prompt_injects_tools(self) -> None:
         """Tool descriptions are rendered inside the system message."""
@@ -128,6 +139,9 @@ class TestSystemPrompt:
 
         assert message["role"] == "system"
         assert "- select_accessions: load accessions" in message["content"]
+        assert "{mode_instructions}" not in SYSTEM_PROMPT_TEMPLATE.format(
+            tools_description="", mode_instructions="", stage_1_and_2=""
+        )
 
 
 class TestAgentLoop:

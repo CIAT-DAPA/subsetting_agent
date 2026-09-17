@@ -143,7 +143,7 @@ async def search_crops(services: ToolServices, *, name: str = "") -> dict[str, A
         services: Shared services.
         name: Full or partial crop name; empty lists every crop.
     """
-    crops = await services.genesys.list_crops()
+    crops = await services.require_genesys().list_crops()
     wanted = normalize_text(name)
     matches = []
 
@@ -167,7 +167,7 @@ async def preview_accessions(services: ToolServices, **arguments: Any) -> dict[s
         **arguments: Passport criteria (see :func:`build_passport_filter`).
     """
     accession_filter, description = build_passport_filter(arguments)
-    overview = await services.genesys.accession_overview(accession_filter, limit=8)
+    overview = await services.require_genesys().accession_overview(accession_filter, limit=8)
     breakdown: dict[str, list[dict[str, Any]]] = {}
 
     # Keep only the distributions that help a user refine the query.
@@ -199,7 +199,7 @@ async def select_accessions(services: ToolServices, **arguments: Any) -> dict[st
     """
     accession_filter, description = build_passport_filter(arguments)
     max_records = arguments.get("max_records")
-    accessions, total = await services.genesys.collect_accessions(
+    accessions, total = await services.require_genesys().collect_accessions(
         accession_filter, max_records=int(max_records) if max_records else None
     )
 
@@ -235,7 +235,7 @@ async def search_trait_descriptors(
         crop=[crop_code.lower()] if crop_code else None,
         title=StringFilter(contains=[keyword]) if keyword else None,
     )
-    page = await services.genesys.list_descriptors(descriptor_filter, page_size=25)
+    page = await services.require_genesys().list_descriptors(descriptor_filter, page_size=25)
 
     descriptors = [
         {
@@ -407,7 +407,7 @@ async def filter_selection_by_trait(
         """
         async with semaphore:
             try:
-                return uuid, await services.genesys.get_observations(uuid)
+                return uuid, await services.require_genesys().get_observations(uuid)
 
             except Exception as exc:  # noqa: BLE001 - one failure must not abort the batch
                 logger.warning("Observations lookup failed for %s: %s", uuid, exc)

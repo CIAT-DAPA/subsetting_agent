@@ -15,8 +15,8 @@ from typing import Any
 
 from genesys_sdk.exceptions import GenesysApiError
 from subsetting_sdk.exceptions import SubsettingApiError
-from tools import document_tools, genesys_tools, subsetting_tools
-from tools.services import ToolServices
+from tools import document_tools, file_tools, genesys_tools, subsetting_tools
+from tools.services import SOURCE_FILE, SOURCE_GENESYS, ToolServices
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +96,95 @@ PASSPORT_PROPERTIES: dict[str, Any] = {
 }
 
 
-def build_registry() -> ToolRegistry:
-    """Create the registry with every tool of the agent."""
+# Tools that only make sense when accessions come from the Genesys API.
+GENESYS_ONLY_TOOLS = frozenset(
+    {
+        "search_crops",
+        "preview_accessions",
+        "select_accessions",
+        "search_trait_descriptors",
+        "filter_selection_by_trait",
+    }
+)
+
+# Tools that only make sense when accessions come from an uploaded spreadsheet.
+FILE_ONLY_TOOLS = frozenset({"list_accession_files", "load_accessions_from_file"})
+
+
+def build_registry(source: str = SOURCE_GENESYS) -> ToolRegistry:
+    """Create the registry for an accession source.
+
+    Args:
+        source: ``"genesys"`` registers passport/trait tools backed by the API;
+            ``"file"`` registers the spreadsheet tools instead. Document and
+            climate tools are always available.
+
+    Raises:
+        ValueError: If the source is unknown.
+    """
+    if source not in (SOURCE_GENESYS, SOURCE_FILE):
+        raise ValueError(f"Unknown accession source '{source}'.")
+
+    full = build_full_registry()
     registry = ToolRegistry()
 
-    # ---- Stage 1: passport --------------------------------------------- #
+    # Keep the tools of the requested source plus the shared ones, in order.
+    for spec in full.tools.values():
+        if source == SOURCE_FILE and spec.name in GENESYS_ONLY_TOOLS:
+            continue
+
+        if source == SOURCE_GENESYS and spec.name in FILE_ONLY_TOOLS:
+            continue
+
+        registry.register(spec)
+
+    return registry
+
+
+def build_full_registry() -> ToolRegistry:
+    """Create the registry with every tool of every source (used to derive the modes)."""
+    registry = ToolRegistry()
+
+    # ---- Stage 1 (file mode): accession spreadsheet -------------------- #
+    registry.register(
+        ToolSpec(
+            name="list_accession_files",
+            description="List the accession spreadsheets (Excel/CSV) the user uploaded.",
+            parameters=_schema({}),
+            handler=file_tools.list_accession_files,
+            stage="passport",
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="load_accessions_from_file",
+            description=(
+                "Load the accessions (identifier + coordinates) from the uploaded spreadsheet "
+                "and start the selection. Columns are auto-detected; pass them only if the "
+                "tool reports it could not find them. Always the FIRST step in file mode."
+            ),
+            parameters=_schema(
+                {
+                    "file_name": {
+                        "type": "string",
+                        "description": "File to load (optional if one).",
+                    },
+                    "id_column": {"type": "string", "description": "Accession identifier column."},
+                    "latitude_column": {"type": "string", "description": "Latitude column."},
+                    "longitude_column": {"type": "string", "description": "Longitude column."},
+                    "crop_column": {"type": "string", "description": "Crop column, if any."},
+                    "default_crop": {
+                        "type": "string",
+                        "description": "Crop code for all rows when the file has no crop column.",
+                    },
+                }
+            ),
+            handler=file_tools.load_accessions_from_file,
+            stage="passport",
+        )
+    )
+
+    # ---- Stage 1 (Genesys mode): passport ------------------------------ #
     registry.register(
         ToolSpec(
             name="search_crops",

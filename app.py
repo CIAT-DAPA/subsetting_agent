@@ -4,8 +4,10 @@ Follows the AClimate ``app.py`` pattern: a new agent per call, no state shared
 between users, and the conversation rebuilt from the per-browser history that
 Gradio passes on every call. Two additions:
 
-* the chat is multimodal so users can attach PDF papers; the paths of every PDF
-  attached so far are collected from the history and handed to the agent;
+* the chat is multimodal so users can attach PDF papers and an accession
+  spreadsheet (Excel/CSV). The paths of every file attached so far are collected
+  from the history and handed to the agent, which decides the accession source:
+  a spreadsheet means file mode, otherwise the Genesys API;
 * the accession selection (``AccessionContext``) is carried between turns in a
   ``gr.State`` component through ``additional_inputs``/``additional_outputs``.
 """
@@ -100,6 +102,9 @@ def extract_file_paths(content: Any) -> list[str]:
     return paths
 
 
+ACCESSION_FILE_SUFFIXES = frozenset({".xlsx", ".xlsm", ".xls", ".csv", ".tsv"})
+
+
 def is_pdf(path: str) -> bool:
     """Whether a path points to a PDF file (by extension).
 
@@ -107,6 +112,15 @@ def is_pdf(path: str) -> bool:
         path: File path.
     """
     return Path(path).suffix.lower() == ".pdf"
+
+
+def is_accession_file(path: str) -> bool:
+    """Whether a path points to a spreadsheet that may hold an accession list.
+
+    Args:
+        path: File path.
+    """
+    return Path(path).suffix.lower() in ACCESSION_FILE_SUFFIXES
 
 
 def build_memory_from_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -138,8 +152,8 @@ def build_memory_from_history(history: list[dict[str, Any]]) -> list[dict[str, A
     return memory[-MAX_HISTORY_MESSAGES:]
 
 
-def collect_pdf_paths(history: list[dict[str, Any]], current_files: list[Any]) -> list[str]:
-    """Collect every PDF attached in the conversation, oldest first, without duplicates.
+def collect_attachments(history: list[dict[str, Any]], current_files: list[Any]) -> list[str]:
+    """Collect every file attached in the conversation, oldest first, without duplicates.
 
     Args:
         history: OpenAI-style messages kept by Gradio.
@@ -156,9 +170,29 @@ def collect_pdf_paths(history: list[dict[str, Any]], current_files: list[Any]) -
     for item in current_files or []:
         paths.extend(extract_file_paths(item) or ([item] if isinstance(item, str) else []))
 
-    unique = list(dict.fromkeys(paths))
+    return list(dict.fromkeys(paths))
 
-    return [path for path in unique if is_pdf(path)]
+
+def collect_pdf_paths(history: list[dict[str, Any]], current_files: list[Any]) -> list[str]:
+    """Collect the PDFs attached in the conversation.
+
+    Args:
+        history: OpenAI-style messages kept by Gradio.
+        current_files: ``files`` entry of the current multimodal message.
+    """
+    return [p for p in collect_attachments(history, current_files) if is_pdf(p)]
+
+
+def collect_accession_file_paths(
+    history: list[dict[str, Any]], current_files: list[Any]
+) -> list[str]:
+    """Collect the accession spreadsheets attached in the conversation.
+
+    Args:
+        history: OpenAI-style messages kept by Gradio.
+        current_files: ``files`` entry of the current multimodal message.
+    """
+    return [p for p in collect_attachments(history, current_files) if is_accession_file(p)]
 
 
 def format_document_errors(errors: list[str]) -> str:
@@ -205,16 +239,25 @@ async def chat(
         files = []
 
     document_paths = collect_pdf_paths(history, files)
+    accession_file_paths = collect_accession_file_paths(history, files)
 
     # A message with only attachments still deserves an answer.
-    if not text.strip() and document_paths:
+    if not text.strip() and accession_file_paths:
+        text = "I attached my accession list. Load it and tell me what it contains."
+
+    elif not text.strip() and document_paths:
         text = "I attached a document. Tell me what you found in it."
 
     agent = SubsettingAgent(model=SUBSETTING_AGENT_MODEL, api_base=SUBSETTING_AGENT_API_BASE)
     agent.memory = build_memory_from_history(history)
 
     try:
-        turn = await agent.chat(text, document_paths=document_paths, context_json=context_json)
+        turn = await agent.chat(
+            text,
+            document_paths=document_paths,
+            accession_file_paths=accession_file_paths,
+            context_json=context_json,
+        )
 
     except Exception:  # noqa: BLE001 - the UI must always answer something
         logger.exception("Agent turn failed")
@@ -241,10 +284,12 @@ def build_app() -> gr.Blocks:
             title="Genesys Subsetting Assistant",
             description=(
                 "Build subsets of genebank accessions from passport data, traits, your own "
-                "papers (attach PDFs) and the climate of the collecting sites."
+                "papers (attach PDFs) and the climate of the collecting sites. Attach an "
+                "Excel/CSV with accession ids and coordinates to work from your own list "
+                "instead of Genesys."
             ),
             textbox=gr.MultimodalTextbox(
-                file_types=[".pdf"],
+                file_types=[".pdf", ".xlsx", ".xls", ".csv", ".tsv"],
                 file_count="multiple",
                 placeholder="e.g. Find bean landraces from Colombia collected in dry areas",
             ),
