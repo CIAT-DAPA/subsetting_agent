@@ -18,9 +18,9 @@ information, always in this order:
 The agent is served through a Gradio chat interface and follows the same
 tool-calling loop as the AClimate "Melisa" agent (litellm + local LLM).
 
-> **Status:** the three data-access layers (`genesys_sdk`, `subsetting_sdk`,
-> `document_processing`) are implemented and tested. The tool layer, the agent
-> and the Gradio app are the next development blocks.
+> **Status:** all blocks are implemented and unit-tested (184 tests, no
+> network): SDKs, document processing, tools, system prompt, agent and Gradio
+> app. Next: validation against the real Genesys sandbox with an API token.
 
 ---
 
@@ -28,10 +28,10 @@ tool-calling loop as the AClimate "Melisa" agent (litellm + local LLM).
 
 ```
 subsetting_agent/
-├── app.py                      # (next) Gradio ChatInterface, multimodal (PDF uploads)
-├── subsetting_agent.py         # (next) SubsettingAgent: LLM tool-calling loop
+├── app.py                      # Gradio ChatInterface, multimodal (PDF uploads)
+├── subsetting_agent.py         # SubsettingAgent: LLM tool-calling loop (litellm)
 ├── prompts/
-│   └── system_prompt.py        # (next) System prompt enforcing the business order
+│   └── system_prompt.py        # System prompt enforcing the business order
 ├── genesys_sdk/                # Genesys PGR REST API (accessions, crops, traits)
 │   ├── client.py               #   GenesysClient (httpx, async, token auth, paging)
 │   ├── models.py               #   AccessionFilter builder, Accession, pages, descriptors
@@ -45,7 +45,13 @@ subsetting_agent/
 │   ├── pdf_converter.py        #   convert_pdf_to_markdown (cached on disk)
 │   ├── document_store.py       #   DocumentStore: sections, outline, lexical search
 │   └── models.py
-├── tools/                      # (next) Tools exposed to the LLM + session state
+├── tools/                      # Tools exposed to the LLM + session state
+│   ├── accession_context.py    #   AccessionContext: selection, stage, steps, clusters (JSON)
+│   ├── services.py             #   ToolServices: clients, document store, context, catalog
+│   ├── genesys_tools.py        #   passport + trait tools
+│   ├── document_tools.py       #   document tools
+│   ├── subsetting_tools.py     #   climate tools + describe_selection
+│   └── registry.py             #   ToolRegistry: OpenAI schemas, validation, dispatch
 ├── tests/                      # pytest suite (no network access required)
 ├── pyproject.toml              # uv project, Python 3.10
 ├── uv.lock
@@ -96,6 +102,27 @@ Edit `.env` and fill in at least `GENESYS_API_TOKEN`.
 
 Never use `pip` directly in this project; every command goes through `uv run`.
 
+## Running the agent
+
+```bash
+ollama pull llama3.1:8b        # or point SUBSETTING_AGENT_MODEL/API_BASE to another litellm model
+uv run python app.py           # http://localhost:7860
+```
+
+The chat accepts text and PDF attachments. Every PDF attached during the
+conversation stays available to the agent (converted once and cached). The
+accession selection persists across turns inside the browser session; opening
+a new tab starts a fresh conversation. Nothing is shared between users.
+
+Example requests:
+
+- "Find bean landraces from Colombia and Peru with coordinates."
+- "Keep only the ones with drought tolerance score above 3."
+- "Group them by total precipitation and maximum temperature between May and
+  September, and keep the driest cluster."
+- (attach a paper) "Which of the selected accessions does this paper report as
+  heat tolerant?"
+
 ---
 
 ## Configuration
@@ -117,6 +144,7 @@ app). Defaults are shown in `.env.example`.
 | `SUBSETTING_AGENT_MODEL` | `ollama_chat/llama3.1:8b` | litellm model name |
 | `SUBSETTING_AGENT_API_BASE` | `http://localhost:11434` | LLM endpoint |
 | `SUBSETTING_AGENT_HOST` / `_PORT` | `localhost` / `7860` | Gradio server |
+| `SUBSETTING_AGENT_LOG_LEVEL` | `INFO` | Logging level of the app |
 
 ---
 
@@ -131,14 +159,15 @@ used from scripts, notebooks or tests.
 import asyncio
 from genesys_sdk import AccessionFilter, GenesysClient
 
+
 async def main() -> None:
     async with GenesysClient() as genesys:
         # Domain-level builder; omitted criteria are not applied.
         passport = AccessionFilter.passport(
             crop_codes=["bean"],
             origin_countries=["COL", "PER"],
-            sample_status=[300],          # MCPD SAMPSTAT: landraces
-            with_coordinates=True,        # required for any climate analysis
+            sample_status=[300],  # MCPD SAMPSTAT: landraces
+            with_coordinates=True,  # required for any climate analysis
         )
 
         overview = await genesys.accession_overview(passport)
@@ -149,6 +178,7 @@ async def main() -> None:
 
         observations = await genesys.get_observations(accessions[0].uuid)
         print(observations.all_records)
+
 
 asyncio.run(main())
 ```
@@ -161,13 +191,18 @@ switching to another field is an environment change only.
 ```python
 import asyncio
 from subsetting_sdk import (
-    ClusteringAlgorithm, ClusterRequest, CropCellIds, IndicatorCatalog, SubsettingClient,
+    ClusteringAlgorithm,
+    ClusterRequest,
+    CropCellIds,
+    IndicatorCatalog,
+    SubsettingClient,
 )
+
 
 async def main() -> None:
     async with SubsettingClient() as subsetting:
         catalog = await IndicatorCatalog.from_client(subsetting)
-        print(catalog.category_names())   # e.g. Drought stress, Heat stress, ...
+        print(catalog.category_names())  # e.g. Drought stress, Heat stress, ...
 
         # Resolve human names into validated filters with the right period ids.
         precipitation = catalog.build_filter(
@@ -189,7 +224,8 @@ async def main() -> None:
                 algorithms=[ClusteringAlgorithm.AGGLOMERATIVE],
             )
         )
-        print(result.clusters(crop="bean"))   # {0: [101, 102], 1: [103], ...}
+        print(result.clusters(crop="bean"))  # {0: [101, 102], 1: [103], ...}
+
 
 asyncio.run(main())
 ```
@@ -210,7 +246,7 @@ for hit in store.search("drought tolerance landraces Mexico", top_k=3):
     print(hit.section.heading, hit.score, hit.snippet)
 
 section = store.read_section(added[0].document_id, index=0)
-store.cleanup()   # deletes the cache directory
+store.cleanup()  # deletes the cache directory
 ```
 
 Each PDF is converted once and cached as
@@ -218,6 +254,78 @@ Each PDF is converted once and cached as
 characters of the SHA-256 of the PDF content. The same PDF uploaded again is
 served from the cache. Documents are split into heading-based sections bounded
 to ~1500 characters so that a small local model can consume search hits.
+
+### Tools exposed to the LLM
+
+The registry (`tools.build_registry()`) defines 14 tools, grouped by stage.
+Every tool receives a `ToolServices` object (clients, document store and the
+session `AccessionContext`) and returns a compact JSON-serializable result;
+failures become `{"error": ...}` so the model can recover.
+
+| Stage | Tool | Purpose |
+|---|---|---|
+| Passport | `search_crops` | Resolve crop names to Genesys crop codes |
+| Passport | `preview_accessions` | Count matches and show a breakdown, without loading |
+| Passport | `select_accessions` | Load georeferenced accessions and start the selection |
+| Traits | `search_trait_descriptors` | Find descriptors by keyword and crop |
+| Traits | `filter_selection_by_trait` | Keep accessions whose observations satisfy a condition |
+| Documents | `list_documents`, `search_documents`, `read_document_section` | Explore uploaded PDFs |
+| Documents | `keep_accessions_from_documents` | Reduce to accession numbers a paper identifies |
+| Climate | `list_climate_indicators` | Indicators by stress category |
+| Climate | `filter_selection_by_climate` | Keep sites with an indicator inside a range |
+| Climate | `cluster_selection_by_climate` | Cluster sites; then `pick_cluster` |
+| Any | `describe_selection` | Stage, counts, applied steps and examples |
+
+```python
+from tools import AccessionContext, ToolServices, build_registry
+
+registry = build_registry()
+services = ToolServices(
+    genesys=genesys_client,
+    subsetting=subsetting_client,
+    documents=store,
+    context=AccessionContext.from_json(saved_state),
+)
+
+result = await registry.execute(services, "select_accessions", {"crop_codes": ["bean"]})
+saved_state = services.context.to_json()  # travels with the chat history
+openai_tools = registry.openai_tools()  # passed to litellm
+```
+
+The context only moves forward through the stages (passport → traits →
+documents → climate) and climate tools operate solely on the cellids of the
+accessions currently selected, which is how the business order is enforced by
+data and not only by the prompt.
+
+### The agent
+
+`SubsettingAgent` keeps the tool-calling loop of the AClimate agent: the
+conversation memory, a per-turn cache that serves repeated calls without
+re-executing them, rescue of tool calls that small models emit as plain-text
+JSON, stall detection and an iteration cap. Tools run locally through the
+registry; there is no MCP session.
+
+```python
+from subsetting_agent import SubsettingAgent
+
+agent = SubsettingAgent()  # model and endpoint from .env
+agent.memory = previous_memory  # rebuilt from the chat history
+
+turn = await agent.chat(
+    "Find bean landraces from Colombia in dry areas",
+    document_paths=uploaded_pdfs,  # every PDF attached so far
+    context_json=previous_context_json,  # selection from the previous turn
+)
+turn.answer  # text for the user
+turn.memory  # updated memory to store
+turn.context_json  # updated selection to store
+turn.document_errors  # PDFs that could not be converted
+```
+
+The system prompt (`prompts/system_prompt.py`) is written in English and asks
+the model to answer in the user's language. It spells out the four stages in
+order, when each one applies, how to recover from tool errors and how to close
+a request (`describe_selection` before the final answer).
 
 ---
 
