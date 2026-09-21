@@ -76,19 +76,13 @@ class TestGrid:
         """The northern and western edges are inclusive."""
         assert DEFAULT_GRID.cellid(50.0, -180.0) == 1
 
-    def test_environment_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_custom_grid(self) -> None:
         """Grid parameters can be replaced without code changes."""
-        monkeypatch.setenv("SUBSETTING_GRID_NCOLS", "360")
-        monkeypatch.setenv("SUBSETTING_GRID_NROWS", "180")
-        monkeypatch.setenv("SUBSETTING_GRID_XMIN", "-180")
-        monkeypatch.setenv("SUBSETTING_GRID_YMIN", "-90")
-        monkeypatch.setenv("SUBSETTING_GRID_CELLSIZE", "1")
-
-        grid = GridSpec.from_environment()
+        grid = GridSpec(ncols=360, nrows=180, xmin=-180, ymin=-90, cellsize=1)
 
         assert grid.ncols == 360 and grid.cellsize == 1.0
-        assert cellid_from_coordinates(89.5, -179.5) == 1
-        assert cellid_from_coordinates(88.5, -179.5) == 361
+        assert cellid_from_coordinates(89.5, -179.5, grid) == 1
+        assert cellid_from_coordinates(88.5, -179.5, grid) == 361
 
     def test_cell_center_out_of_range(self) -> None:
         """Invalid ids are rejected."""
@@ -109,7 +103,7 @@ class TestReader:
             ],
         )
 
-        report = read_accession_file(path)
+        report = read_accession_file(path, grid=DEFAULT_GRID)
 
         assert report.columns == {
             "id": "Accession number",
@@ -135,7 +129,7 @@ class TestReader:
             encoding="utf-8",
         )
 
-        report = read_accession_file(path)
+        report = read_accession_file(path, grid=DEFAULT_GRID)
 
         assert report.total_rows == 6
         assert report.accepted == 1
@@ -155,7 +149,12 @@ class TestReader:
         )
 
         report = read_accession_file(
-            path, id_column="code", latitude_column="Y", longitude_column="X", default_crop="Maize"
+            path,
+            id_column="code",
+            latitude_column="Y",
+            longitude_column="X",
+            default_crop="Maize",
+            grid=DEFAULT_GRID,
         )
 
         assert report.accepted == 2
@@ -166,14 +165,14 @@ class TestReader:
         path = write_accessions(tmp_path / "bad.xlsx", [{"Accession": "G1", "Country": "COL"}])
 
         with pytest.raises(AccessionFileError, match="latitude, longitude"):
-            read_accession_file(path)
+            read_accession_file(path, grid=DEFAULT_GRID)
 
     def test_explicit_column_not_found(self, tmp_path: Path) -> None:
         """A wrong explicit column name is reported with the available ones."""
         path = write_accessions(tmp_path / "x.csv", [{"id": "1", "lat": 1, "lon": 1}])
 
         with pytest.raises(AccessionFileError, match="Available columns"):
-            read_accession_file(path, id_column="uuid")
+            read_accession_file(path, id_column="uuid", grid=DEFAULT_GRID)
 
     def test_unsupported_and_missing_files(self, tmp_path: Path) -> None:
         """Unsupported types and missing files raise clear errors."""
@@ -181,16 +180,16 @@ class TestReader:
         text.write_text("x")
 
         with pytest.raises(AccessionFileError, match="Unsupported"):
-            read_accession_file(text)
+            read_accession_file(text, grid=DEFAULT_GRID)
 
         with pytest.raises(AccessionFileError, match="not found"):
-            read_accession_file(tmp_path / "nope.xlsx")
+            read_accession_file(tmp_path / "nope.xlsx", grid=DEFAULT_GRID)
 
     def test_summary_is_compact(self, tmp_path: Path) -> None:
         """The summary exposes counts and capped examples only."""
         path = write_accessions(tmp_path / "s.csv", [{"id": "1", "lat": 4.5, "lon": -74.1}])
 
-        summary = read_accession_file(path).summary()
+        summary = read_accession_file(path, grid=DEFAULT_GRID).summary()
 
         assert summary["accepted"] == 1
         assert set(summary) >= {"file_name", "columns", "total_rows", "rejected_count"}
@@ -389,7 +388,7 @@ class TestAgentModeSelection:
             ]
         )
         monkeypatch.setattr(agent_module, "acompletion", fake)
-        agent = SubsettingAgent(model="fake", api_base="http://fake", services=file_services)
+        agent = SubsettingAgent(services=file_services)
 
         turn = await agent.chat("load my list", accession_file_paths=file_services.accession_files)
 
@@ -414,7 +413,7 @@ class TestAgentModeSelection:
         )
         fake = FakeLLM([llm_response("Which crop?")])
         monkeypatch.setattr(agent_module, "acompletion", fake)
-        agent = SubsettingAgent(model="fake", api_base="http://fake", services=services)
+        agent = SubsettingAgent(services=services)
 
         await agent.chat("find accessions")
 
@@ -426,7 +425,7 @@ class TestAgentModeSelection:
 
     def test_build_services_skips_genesys_in_file_mode(self, tmp_path: Path) -> None:
         """No Genesys client is created when a spreadsheet is present."""
-        agent = SubsettingAgent(model="fake", api_base="http://fake")
+        agent = SubsettingAgent()
         sheet = tmp_path / "a.xlsx"
 
         with_file = agent._build_services([sheet])

@@ -5,12 +5,13 @@ climate/soil indicators (with their datasets) and clustering a set of grid
 cells by indicator values. It is independent from the agent and the LLM so it
 can be used from scripts, notebooks or tests.
 
-Authentication: when ``SUBSETTING_API_TOKEN`` is set, every request carries
+Authentication: when a token is given, every request carries
 ``Authorization: <scheme> <token>`` (scheme ``API-Token`` by default, as in the
-Genesys API; configurable with ``SUBSETTING_API_AUTH_SCHEME``).
+Genesys API). Configuration comes from the caller (``config.Settings`` in the
+app); this module never reads environment variables.
 
 Example:
-    async with SubsettingClient() as client:
+    async with SubsettingClient(base_url, token="...") as client:
         categories = await client.get_indicators()
 """
 
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from types import TracebackType
 from typing import Any
 
@@ -63,50 +63,34 @@ class SubsettingClient:
 
     def __init__(
         self,
-        base_url: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
         *,
-        api_prefix: str | None = None,
-        token: str | None = None,
-        auth_scheme: str | None = None,
-        timeout: float | None = None,
+        api_prefix: str = DEFAULT_API_PREFIX,
+        token: str = "",
+        auth_scheme: str = DEFAULT_AUTH_SCHEME,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
         max_retries: int = 2,
         backoff_seconds: float = 1.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """Configure the client.
 
-        Every argument falls back to an environment variable and then to a
-        default, so the client can be created with no arguments in production.
-
         Args:
-            base_url: Root URL of the API (``SUBSETTING_API_URL``).
-            api_prefix: Route prefix (``SUBSETTING_API_PREFIX``).
-            token: API token (``SUBSETTING_API_TOKEN``). Requests are sent
-                without the header when no token is configured.
-            auth_scheme: Authorization scheme (``SUBSETTING_API_AUTH_SCHEME``).
-            timeout: Per-request timeout in seconds (``SUBSETTING_API_TIMEOUT``).
+            base_url: Root URL of the API.
+            api_prefix: Route prefix; an empty string when the proxy strips it.
+            token: API token. Requests are sent without the header when empty.
+            auth_scheme: Authorization scheme placed before the token.
+            timeout: Per-request timeout in seconds.
             max_retries: Additional attempts for retryable failures.
             backoff_seconds: Base delay between retries; doubles on each attempt.
             http_client: Pre-configured ``httpx.AsyncClient``. Mainly for tests;
                 when provided, the caller owns its lifecycle.
         """
-        self.base_url = (base_url or os.getenv("SUBSETTING_API_URL", DEFAULT_BASE_URL)).rstrip("/")
-
-        # ``api_prefix`` may legitimately be an empty string, so ``None`` is the
-        # only value that triggers the environment/default fallback.
-        if api_prefix is None:
-            api_prefix = os.getenv("SUBSETTING_API_PREFIX", DEFAULT_API_PREFIX)
-
+        self.base_url = base_url.rstrip("/")
         self.api_prefix = "/" + api_prefix.strip("/") if api_prefix.strip("/") else ""
-        self.token = token if token is not None else os.getenv("SUBSETTING_API_TOKEN", "")
-        self.auth_scheme = (
-            auth_scheme or os.getenv("SUBSETTING_API_AUTH_SCHEME", DEFAULT_AUTH_SCHEME)
-        ).strip()
-        self.timeout = float(
-            timeout
-            if timeout is not None
-            else os.getenv("SUBSETTING_API_TIMEOUT", DEFAULT_TIMEOUT_SECONDS)
-        )
+        self.token = token
+        self.auth_scheme = auth_scheme.strip() or DEFAULT_AUTH_SCHEME
+        self.timeout = float(timeout)
         self.max_retries = max_retries
         self.backoff_seconds = backoff_seconds
 

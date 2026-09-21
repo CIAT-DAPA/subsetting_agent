@@ -16,7 +16,6 @@ from document_processing import (
     build_cache_file_name,
     compute_document_id,
     convert_pdf_to_markdown,
-    default_cache_dir,
     find_cached_markdown,
 )
 
@@ -122,12 +121,6 @@ class TestCacheNaming:
         """No file for the hash (or no directory) yields ``None``."""
         assert find_cached_markdown(tmp_path, "abcdef123456") is None
         assert find_cached_markdown(tmp_path / "nope", "abcdef123456") is None
-
-    def test_default_cache_dir_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``DOCUMENT_CACHE_DIR`` overrides the system temp default."""
-        monkeypatch.setenv("DOCUMENT_CACHE_DIR", "/some/where")
-
-        assert default_cache_dir() == Path("/some/where")
 
 
 class TestConvertPdfToMarkdown:

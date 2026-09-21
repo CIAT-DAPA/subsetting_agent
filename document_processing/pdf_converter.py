@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -29,27 +27,12 @@ HASH_LENGTH = 12
 # Timestamp format of the cache file name (Windows forbids ':' in file names).
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
 
-# Name of the environment variable that overrides the cache directory.
-CACHE_DIR_ENV = "DOCUMENT_CACHE_DIR"
-
 # Markdown heading at the start of a line, used to detect the title.
 _HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
 
 class PdfConversionError(Exception):
     """Raised when a PDF cannot be read or converted to Markdown."""
-
-
-def default_cache_dir() -> Path:
-    """Return the cache directory, from ``DOCUMENT_CACHE_DIR`` or the system temp dir."""
-    configured = os.getenv(CACHE_DIR_ENV)
-
-    # An explicit directory wins; otherwise a dedicated folder under the system
-    # temporary directory keeps conversions apart from other temp files.
-    if configured:
-        return Path(configured)
-
-    return Path(tempfile.gettempdir()) / "subsetting_agent_documents"
 
 
 def compute_document_id(pdf_path: Path) -> str:
@@ -123,7 +106,7 @@ def extract_title(markdown: str, metadata_title: str | None, fallback: str) -> s
 
 def convert_pdf_to_markdown(
     pdf_path: str | Path,
-    cache_dir: str | Path | None = None,
+    cache_dir: str | Path,
     *,
     force: bool = False,
 ) -> ConvertedDocument:
@@ -131,7 +114,7 @@ def convert_pdf_to_markdown(
 
     Args:
         pdf_path: PDF uploaded by the user.
-        cache_dir: Where the ``.md`` files live; defaults to :func:`default_cache_dir`.
+        cache_dir: Where the ``.md`` files live (configured by the application).
         force: Convert again even if a cached file exists.
 
     Returns:
@@ -141,7 +124,7 @@ def convert_pdf_to_markdown(
         PdfConversionError: If the file is missing, empty, not a PDF or unreadable.
     """
     source = Path(pdf_path)
-    target_dir = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+    target_dir = Path(cache_dir)
 
     # Validate the input before touching the converter, so errors are explicit.
     if not source.is_file():

@@ -106,6 +106,7 @@ async def load_accessions_from_file(
             longitude_column=longitude_column,
             crop_column=crop_column,
             default_crop=default_crop,
+            grid=services.grid,
         )
 
     except AccessionFileError as exc:
@@ -149,6 +150,5 @@ async def load_accessions_from_file(
             "The file has no crop column and no default_crop was given. Generic climate "
             "indicators work; crop-specific ones need a crop. Ask the user for the crop if needed."
         )
-    print(f"Filereader: Loaded {len(records)} accessions from file {report.file_name} (columns: {report.columns})")
-    print(f"Filereader: {result}")
+
     return result

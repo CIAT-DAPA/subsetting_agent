@@ -17,8 +17,10 @@ from pathlib import Path
 
 from document_processing.document_store import DocumentStore
 from genesys_sdk.client import GenesysClient
+from genesys_sdk.models import DEFAULT_CELLID_FIELD
 from subsetting_sdk.catalog import IndicatorCatalog
 from subsetting_sdk.client import SubsettingClient
+from subsetting_sdk.grid import GridSpec
 from tools.accession_context import AccessionContext
 
 SOURCE_GENESYS = "genesys"
@@ -34,6 +36,8 @@ class ToolServices:
         documents: Store of the user's uploaded PDFs.
         genesys: Genesys API client; ``None`` in file mode.
         accession_files: Spreadsheets with accession lists uploaded by the user.
+        grid: Grid used to compute cellids from spreadsheet coordinates.
+        cellid_field: Dotted path of the Genesys accession field used as cellid.
         context: Current accession selection.
         catalog: Indicator catalog; loaded on first use.
         max_trait_lookups: Upper bound of accessions whose observations are
@@ -45,6 +49,8 @@ class ToolServices:
     documents: DocumentStore
     genesys: GenesysClient | None = None
     accession_files: list[Path] = field(default_factory=list)
+    grid: GridSpec = field(default_factory=GridSpec)
+    cellid_field: str = DEFAULT_CELLID_FIELD
     context: AccessionContext = field(default_factory=AccessionContext)
     catalog: IndicatorCatalog | None = None
     max_trait_lookups: int = 300

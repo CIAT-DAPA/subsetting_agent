@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
-from genesys_sdk.models import Accession
+from genesys_sdk.models import DEFAULT_CELLID_FIELD, Accession
 from subsetting_sdk.models import CropCellIds
 
 
@@ -70,11 +70,14 @@ class AccessionRecord:
     doi: str | None = None
 
     @classmethod
-    def from_accession(cls, accession: Accession) -> AccessionRecord:
+    def from_accession(
+        cls, accession: Accession, cellid_field: str = DEFAULT_CELLID_FIELD
+    ) -> AccessionRecord:
         """Build a record from a Genesys accession.
 
         Args:
             accession: Accession returned by the Genesys SDK.
+            cellid_field: Dotted path of the accession field holding the cellid.
         """
         return cls(
             uuid=accession.uuid,
@@ -85,7 +88,7 @@ class AccessionRecord:
             country_code=accession.country_code,
             latitude=accession.latitude,
             longitude=accession.longitude,
-            cellid=accession.cellid(),
+            cellid=accession.cellid(cellid_field),
             doi=accession.doi,
         )
 
@@ -241,6 +244,7 @@ class AccessionContext:
         passport_filter: dict[str, Any],
         total_matching: int,
         description: str,
+        cellid_field: str = DEFAULT_CELLID_FIELD,
     ) -> None:
         """Start a new selection from a passport query, discarding previous state.
 
@@ -249,9 +253,10 @@ class AccessionContext:
             passport_filter: Serialized filter that produced them.
             total_matching: Total matching accessions on the server.
             description: Plain-words description of the query.
+            cellid_field: Dotted path of the accession field holding the cellid.
         """
         self._start_selection(
-            {a.uuid: AccessionRecord.from_accession(a) for a in accessions},
+            {a.uuid: AccessionRecord.from_accession(a, cellid_field) for a in accessions},
             passport_filter=passport_filter,
             total_matching=total_matching,
             description=description,

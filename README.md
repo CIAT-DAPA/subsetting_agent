@@ -19,7 +19,7 @@ information, always in this order:
 The agent is served through a Gradio chat interface and follows the same
 tool-calling loop as the AClimate "Melisa" agent (litellm + local LLM).
 
-> **Status:** all blocks are implemented and unit-tested (223 tests, no
+> **Status:** all blocks are implemented and unit-tested (226 tests, no
 > network): SDKs, document processing, accession spreadsheets, upload storage,
 > tools, system prompt, agent and Gradio app. Next: validation against the real Genesys
 > sandbox with an API token.
@@ -30,7 +30,8 @@ tool-calling loop as the AClimate "Melisa" agent (litellm + local LLM).
 
 ```
 subsetting_agent/
-├── app.py                      # Gradio ChatInterface, multimodal (PDF uploads)
+├── app.py                      # Gradio ChatInterface, multimodal; loads .env -> Settings
+├── config.py                   # Settings dataclasses; the ONLY module reading os.getenv
 ├── subsetting_agent.py         # SubsettingAgent: LLM tool-calling loop (litellm)
 ├── prompts/
 │   └── system_prompt.py        # System prompt enforcing the business order
@@ -170,8 +171,20 @@ Example requests:
 
 ## Configuration
 
-All settings are read from environment variables (loaded from `.env` by the
-app). Defaults are shown in `.env.example`.
+All settings are read from environment variables in **one place**:
+`config.Settings.from_environment()`, called once by `app.py` after
+`load_dotenv()`. Every other module (SDKs, stores, tools, agent) receives its
+configuration as explicit parameters and never touches the environment, so it
+can be used from scripts and tests with plain arguments. Defaults are shown in
+`.env.example`.
+
+```python
+from config import Settings
+from subsetting_agent import SubsettingAgent
+
+settings = Settings.from_environment()      # app.py does this once
+agent = SubsettingAgent(settings)           # builds clients, stores and grid from it
+```
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -191,6 +204,8 @@ app). Defaults are shown in `.env.example`.
 | `GRADIO_TEMP_DIR` | `data/gradio_tmp` | Gradio's own temporary upload cache |
 | `SUBSETTING_AGENT_MODEL` | `ollama_chat/llama3.1:8b` | litellm model name |
 | `SUBSETTING_AGENT_API_BASE` | `http://localhost:11434` | LLM endpoint |
+| `SUBSETTING_AGENT_MAX_ITERATIONS` / `_MAX_TOKENS` / `_TEMPERATURE` / `_NUM_CTX` | `15` / `1024` / `0.1` / `8192` | Agent loop limits |
+| `SUBSETTING_AGENT_MAX_HISTORY` | `20` | Recent chat messages replayed to the model |
 | `SUBSETTING_AGENT_HOST` / `_PORT` | `localhost` / `7860` | Gradio server |
 | `SUBSETTING_AGENT_LOG_LEVEL` | `INFO` | Logging level of the app |
 
@@ -209,7 +224,7 @@ from genesys_sdk import AccessionFilter, GenesysClient
 
 
 async def main() -> None:
-    async with GenesysClient() as genesys:
+    async with GenesysClient("https://api.sandbox.genesys-pgr.org", token="...") as genesys:
         # Domain-level builder; omitted criteria are not applied.
         passport = AccessionFilter.passport(
             crop_codes=["bean"],
@@ -231,8 +246,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`Accession.cellid()` reads the field configured in `GENESYS_CELLID_FIELD`, so
-switching to another field is an environment change only.
+`Accession.cellid(field)` reads `geo.tileIndex` by default; the app passes the
+field configured in `GENESYS_CELLID_FIELD`, so switching is an environment
+change only.
 
 ### Subsetting: climate indicators and clustering
 
@@ -284,7 +300,7 @@ failures (401/403) raise `SubsettingAuthError` with a hint about
 ```python
 from document_processing import DocumentStore
 
-store = DocumentStore()
+store = DocumentStore("data/documents")
 added, errors = store.add_pdfs(["paper_drought_beans.pdf"])
 
 for hit in store.search("drought tolerance landraces Mexico", top_k=3):

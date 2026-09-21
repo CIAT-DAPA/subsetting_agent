@@ -261,7 +261,7 @@ def read_accession_file(
     longitude_column: str | None = None,
     crop_column: str | None = None,
     default_crop: str | None = None,
-    grid: GridSpec | None = None,
+    grid: GridSpec,
     max_rejected_messages: int = 50,
 ) -> AccessionFileReport:
     """Read an accession list and compute the grid cell of every row.
@@ -274,7 +274,7 @@ def read_accession_file(
         longitude_column: Longitude column (auto-detected when ``None``).
         crop_column: Crop column (auto-detected when ``None``; optional).
         default_crop: Crop assigned to rows without a crop value.
-        grid: Grid definition; the environment-configured grid when ``None``.
+        grid: Grid used to compute the cellid of every row.
         max_rejected_messages: Cap on the number of rejection messages kept.
 
     Raises:
@@ -285,7 +285,6 @@ def read_accession_file(
     frame = _read_table(file_path)
     columns = [str(column) for column in frame.columns]
     frame.columns = columns
-    grid = grid or GridSpec.from_environment()
 
     id_col = _find_column(columns, ID_HEADERS, id_column)
     lat_col = _find_column(columns, LATITUDE_HEADERS, latitude_column)

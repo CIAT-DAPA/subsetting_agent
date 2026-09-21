@@ -11,6 +11,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 import subsetting_agent as agent_module
+from config import AgentSettings, Settings
 from document_processing import DocumentStore
 from genesys_sdk import GenesysClient
 from prompts import SYSTEM_PROMPT_TEMPLATE, build_system_prompt
@@ -106,9 +107,9 @@ def make_agent(
     """
     monkeypatch.setattr(agent_module, "acompletion", fake)
 
-    return SubsettingAgent(
-        model="fake", api_base="http://fake", services=services, max_iterations=6
-    )
+    settings = Settings(agent=AgentSettings(model="fake", api_base="http://fake", max_iterations=6))
+
+    return SubsettingAgent(settings, services=services)
 
 
 class TestSystemPrompt:

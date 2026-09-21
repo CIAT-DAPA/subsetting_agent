@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -30,20 +29,21 @@ load_dotenv()
 
 import gradio as gr  # noqa: E402
 
+from config import Settings  # noqa: E402
 from storage.uploads import UploadError, UploadStore  # noqa: E402
 from subsetting_agent import SubsettingAgent  # noqa: E402
 
-SUBSETTING_AGENT_MODEL = os.getenv("SUBSETTING_AGENT_MODEL", "ollama_chat/llama3.1:8b")
-SUBSETTING_AGENT_API_BASE = os.getenv("SUBSETTING_AGENT_API_BASE", "http://localhost:11434")
-SUBSETTING_AGENT_HOST = os.getenv("SUBSETTING_AGENT_HOST", "localhost")
-SUBSETTING_AGENT_PORT = int(os.getenv("SUBSETTING_AGENT_PORT", "7860"))
-LOG_LEVEL = os.getenv("SUBSETTING_AGENT_LOG_LEVEL", "INFO")
+# The only place where the environment is turned into configuration. Every other
+# module receives what it needs from here.
+SETTINGS = Settings.from_environment()
 
 # How many recent history messages are passed to the model. Bounds the context
 # window use (num_ctx) in long conversations.
-MAX_HISTORY_MESSAGES = 20
+MAX_HISTORY_MESSAGES = SETTINGS.agent.max_history_messages
 
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=SETTINGS.server.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -225,7 +225,7 @@ def persist_attachments(
         The stable paths (oldest first, no duplicates), the error messages for
         attachments that could not be persisted, and the updated session state.
     """
-    store = store or UploadStore()
+    store = store or UploadStore(SETTINGS.storage.uploads_dir)
     mapping = load_attachment_state(attachments_json)
     errors: list[str] = []
 
@@ -346,7 +346,7 @@ async def chat(
     elif not text.strip() and document_paths:
         text = "I attached a document. Tell me what you found in it."
 
-    agent = SubsettingAgent(model=SUBSETTING_AGENT_MODEL, api_base=SUBSETTING_AGENT_API_BASE)
+    agent = SubsettingAgent(SETTINGS)
     agent.memory = build_memory_from_history(history)
 
     try:
@@ -404,4 +404,4 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     app = build_app()
-    app.launch(server_name=SUBSETTING_AGENT_HOST, server_port=SUBSETTING_AGENT_PORT)
+    app.launch(server_name=SETTINGS.server.host, server_port=SETTINGS.server.port)

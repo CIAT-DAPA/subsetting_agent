@@ -11,16 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-# Environment variable that overrides the uploads directory.
-UPLOADS_DIR_ENV = "UPLOADS_DIR"
-DEFAULT_UPLOADS_DIR = Path("tmp") / "uploads"
 
 # Timestamp format of the stored file name (Windows forbids ':' in file names).
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
@@ -29,17 +24,6 @@ HASH_LENGTH = 12
 
 class UploadError(Exception):
     """Raised when an attachment cannot be persisted."""
-
-
-def default_uploads_dir() -> Path:
-    """Return the uploads directory from ``UPLOADS_DIR`` or the project default."""
-    configured = os.getenv(UPLOADS_DIR_ENV)
-
-    # An explicit directory wins; otherwise ``data/uploads`` under the working dir.
-    if configured:
-        return Path(configured)
-
-    return DEFAULT_UPLOADS_DIR
 
 
 def content_hash(path: Path) -> str:
@@ -65,13 +49,13 @@ class UploadStore:
         directory: Where persisted uploads live.
     """
 
-    def __init__(self, directory: str | Path | None = None) -> None:
+    def __init__(self, directory: str | Path) -> None:
         """Create the store.
 
         Args:
-            directory: Target directory; :func:`default_uploads_dir` when ``None``.
+            directory: Target directory (configured by the application).
         """
-        self.directory = Path(directory) if directory is not None else default_uploads_dir()
+        self.directory = Path(directory)
 
     def find_existing(self, digest: str, suffix: str) -> Path | None:
         """Return an already persisted file with the same content, if any.

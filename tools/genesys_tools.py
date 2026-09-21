@@ -208,6 +208,7 @@ async def select_accessions(services: ToolServices, **arguments: Any) -> dict[st
         passport_filter=accession_filter.to_api(),
         total_matching=total,
         description=description,
+        cellid_field=services.cellid_field,
     )
     summary = services.context.summary()
 

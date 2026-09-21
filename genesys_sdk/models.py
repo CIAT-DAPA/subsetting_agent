@@ -8,20 +8,13 @@ and omit unset fields, because Genesys treats an absent filter property as
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Environment variable holding the dotted path of the accession field that is
-# the Subsetting API ``cellid`` (e.g. ``geo.tileIndex`` or ``tileIndex3min``).
-CELLID_FIELD_ENV = "GENESYS_CELLID_FIELD"
+# Dotted path of the accession field that is the Subsetting API ``cellid`` by
+# default (alternative: ``tileIndex3min``). The app can override it.
 DEFAULT_CELLID_FIELD = "geo.tileIndex"
-
-
-def cellid_field() -> str:
-    """Return the dotted path of the accession field used as cellid."""
-    return os.getenv(CELLID_FIELD_ENV, DEFAULT_CELLID_FIELD)
 
 
 def read_path(data: dict[str, Any] | None, path: str) -> Any:
@@ -513,17 +506,16 @@ class Accession(_ApiModel):
 
         return self.genus
 
-    def cellid(self, field: str | None = None) -> int | None:
+    def cellid(self, field: str = DEFAULT_CELLID_FIELD) -> int | None:
         """Return the Subsetting API cellid of the collecting site.
 
         Args:
-            field: Dotted path of the field to read; defaults to the value of
-                ``GENESYS_CELLID_FIELD`` (``geo.tileIndex`` when unset).
+            field: Dotted path of the field to read (``geo.tileIndex`` by default).
 
         Returns:
             The integer cellid, or ``None`` when the accession has no value.
         """
-        value = read_path(self.raw, field or cellid_field())
+        value = read_path(self.raw, field)
 
         # The field may be missing or explicitly null for non-georeferenced
         # accessions; both mean "no cell".

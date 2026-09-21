@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import AsyncIterator
 from types import TracebackType
 from typing import Any
@@ -64,33 +63,32 @@ class GenesysClient:
 
     def __init__(
         self,
-        base_url: str | None = None,
+        base_url: str = DEFAULT_BASE_URL,
         *,
-        token: str | None = None,
-        timeout: float | None = None,
+        token: str = "",
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        max_accessions: int = DEFAULT_MAX_ACCESSIONS,
         max_retries: int = 2,
         backoff_seconds: float = 1.0,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
-        """Configure the client from arguments, environment variables or defaults.
+        """Configure the client. Configuration comes from the caller, never from the environment.
 
         Args:
-            base_url: Root URL (``GENESYS_API_URL``).
-            token: API token (``GENESYS_API_TOKEN``). Requests are sent without
-                the header when no token is configured; the API then serves
-                only public data or answers 401.
-            timeout: Per-request timeout in seconds (``GENESYS_API_TIMEOUT``).
+            base_url: Root URL of the API.
+            token: API token. Requests are sent without the header when empty;
+                the API then serves only public data or answers 401.
+            timeout: Per-request timeout in seconds.
+            max_accessions: Default cap on accessions fetched by
+                :meth:`iter_accessions` / :meth:`collect_accessions`.
             max_retries: Additional attempts for retryable failures.
             backoff_seconds: Base delay between retries; doubles each attempt.
             http_client: Pre-configured ``httpx.AsyncClient`` owned by the caller.
         """
-        self.base_url = (base_url or os.getenv("GENESYS_API_URL", DEFAULT_BASE_URL)).rstrip("/")
-        self.token = token if token is not None else os.getenv("GENESYS_API_TOKEN", "")
-        self.timeout = float(
-            timeout
-            if timeout is not None
-            else os.getenv("GENESYS_API_TIMEOUT", DEFAULT_TIMEOUT_SECONDS)
-        )
+        self.base_url = base_url.rstrip("/")
+        self.token = token
+        self.timeout = float(timeout)
+        self.max_accessions = max_accessions
         self.max_retries = max_retries
         self.backoff_seconds = backoff_seconds
 
@@ -189,17 +187,13 @@ class GenesysClient:
             accession_filter: Passport filter.
             page_size: Records per page.
             max_records: Stop after this many records have been yielded
-                (``GENESYS_MAX_ACCESSIONS`` when ``None``). The last page may
-                be truncated to respect the cap exactly.
+                (the client's ``max_accessions`` when ``None``). The last page
+                may be truncated to respect the cap exactly.
 
         Yields:
             Pages in order.
         """
-        cap = (
-            max_records
-            if max_records is not None
-            else int(os.getenv("GENESYS_MAX_ACCESSIONS", DEFAULT_MAX_ACCESSIONS))
-        )
+        cap = max_records if max_records is not None else self.max_accessions
         fetched = 0
         page_index = 0
         filter_code: str | None = None

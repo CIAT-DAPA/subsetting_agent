@@ -206,19 +206,17 @@ class TestAccessionModel:
         assert accession.country_code == "COL"
         assert accession.taxon_name == "Phaseolus vulgaris L."
 
-    def test_cellid_default_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cellid_default_field(self) -> None:
         """By default the cellid is ``geo.tileIndex``."""
-        monkeypatch.delenv("GENESYS_CELLID_FIELD", raising=False)
         accession = Accession.from_api(accession_payload("u-001", tile=555, tile3=777))
 
         assert accession.cellid() == 555
 
-    def test_cellid_configured_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``GENESYS_CELLID_FIELD`` switches the source field without code changes."""
-        monkeypatch.setenv("GENESYS_CELLID_FIELD", "tileIndex3min")
+    def test_cellid_explicit_field(self) -> None:
+        """The caller can read another field without code changes."""
         accession = Accession.from_api(accession_payload("u-001", tile=555, tile3=777))
 
-        assert accession.cellid() == 777
+        assert accession.cellid("tileIndex3min") == 777
         assert accession.cellid("geo.tileIndex") == 555
 
     def test_cellid_missing(self) -> None:
@@ -336,17 +334,14 @@ class TestIterAccessions:
         assert total == 10
         assert len(httpx_mock.get_requests()) == 1
 
-    async def test_cap_from_environment(
-        self, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """``GENESYS_MAX_ACCESSIONS`` is the default cap."""
-        monkeypatch.setenv("GENESYS_MAX_ACCESSIONS", "2")
+    async def test_cap_from_client_setting(self, httpx_mock: HTTPXMock) -> None:
+        """The client's ``max_accessions`` is the default cap."""
         httpx_mock.add_response(
             url=f"{BASE}/api/v2/acn/list?p=0&l=50",
             json=page_payload(["u-001", "u-002", "u-003"], number=0, total=3, last=False),
         )
 
-        async with make_client() as client:
+        async with make_client(max_accessions=2) as client:
             accessions, _ = await client.collect_accessions(AccessionFilter(crop=["bean"]))
 
         assert len(accessions) == 2

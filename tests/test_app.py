@@ -18,6 +18,7 @@ from app import (
     extract_text,
     format_document_errors,
 )
+from tests.test_uploads import settings_with_uploads
 
 
 class TestExtractText:
@@ -120,7 +121,7 @@ class TestChatHandler:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """The agent receives memory, persisted PDFs/sheets and context; outputs are returned."""
-        monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+        monkeypatch.setattr(app_module, "SETTINGS", settings_with_uploads(tmp_path / "uploads"))
         paper = tmp_path / "paper.pdf"
         new_pdf = tmp_path / "new.pdf"
         sheet = tmp_path / "list.xlsx"
@@ -132,7 +133,7 @@ class TestChatHandler:
         class FakeAgent:
             """Minimal agent double recording what it receives."""
 
-            def __init__(self, **kwargs) -> None:
+            def __init__(self, *args, **kwargs) -> None:
                 """Accept any configuration."""
                 self.memory = []
 
@@ -175,7 +176,7 @@ class TestChatHandler:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A message with a PDF and no text still reaches the agent."""
-        monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+        monkeypatch.setattr(app_module, "SETTINGS", settings_with_uploads(tmp_path / "uploads"))
         paper = tmp_path / "paper.pdf"
         paper.write_bytes(b"paper")
         captured: dict = {}
@@ -183,7 +184,7 @@ class TestChatHandler:
         class FakeAgent:
             """Agent double."""
 
-            def __init__(self, **kwargs) -> None:
+            def __init__(self, *args, **kwargs) -> None:
                 """Accept any configuration."""
                 self.memory = []
 
@@ -204,7 +205,7 @@ class TestChatHandler:
         class BrokenAgent:
             """Agent double that always fails."""
 
-            def __init__(self, **kwargs) -> None:
+            def __init__(self, *args, **kwargs) -> None:
                 """Accept any configuration."""
                 self.memory = []
 

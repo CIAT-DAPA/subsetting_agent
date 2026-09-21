@@ -9,6 +9,7 @@ from genesys_sdk.exceptions import (
     GenesysNotFoundError,
 )
 from genesys_sdk.models import (
+    DEFAULT_CELLID_FIELD,
     Accession,
     AccessionDetails,
     AccessionFilter,
@@ -26,7 +27,6 @@ from genesys_sdk.models import (
     NumberFilter,
     StringFilter,
     TaxonomyFilter,
-    cellid_field,
     read_path,
 )
 
@@ -54,6 +54,6 @@ __all__ = [
     "NumberFilter",
     "StringFilter",
     "TaxonomyFilter",
-    "cellid_field",
+    "DEFAULT_CELLID_FIELD",
     "read_path",
 ]

@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from litellm import acompletion
 
+from config import Settings
 from document_processing.document_store import DocumentStore
 from genesys_sdk.client import GenesysClient
 from prompts.system_prompt import build_system_prompt
@@ -30,9 +30,6 @@ from tools.registry import ToolRegistry, build_registry
 from tools.services import SOURCE_FILE, SOURCE_GENESYS, ToolServices
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MODEL = "ollama_chat/llama3.1:8b"
-DEFAULT_API_BASE = "http://localhost:11434"
 
 
 class _RescuedFunction:
@@ -98,41 +95,32 @@ class SubsettingAgent:
 
     def __init__(
         self,
+        settings: Settings | None = None,
         *,
-        model: str | None = None,
-        api_base: str | None = None,
-        max_iterations: int = 15,
-        max_tokens: int = 1024,
-        temperature: float = 0.1,
-        num_ctx: int = 8192,
         registry: ToolRegistry | None = None,
         services: ToolServices | None = None,
-        document_cache_dir: str | Path | None = None,
     ) -> None:
         """Configure the agent.
 
+        The agent never reads environment variables: everything comes from
+        ``settings``, which the application builds once from its ``.env``.
+
         Args:
-            model: litellm model name (``SUBSETTING_AGENT_MODEL``).
-            api_base: LLM endpoint (``SUBSETTING_AGENT_API_BASE``).
-            max_iterations: Maximum LLM calls per turn.
-            max_tokens: Maximum tokens per LLM answer.
-            temperature: Sampling temperature.
-            num_ctx: Context window requested from Ollama.
+            settings: Application settings; code defaults when ``None`` (tests).
             registry: Tool registry; when ``None`` the registry matching the
                 accession source of each turn is built automatically.
             services: Pre-built services (tests); when ``None`` they are created
-                per turn from the environment and the uploaded files.
-            document_cache_dir: Cache directory for PDF conversions.
+                per turn from the settings and the uploaded files.
         """
-        self.model = model or os.getenv("SUBSETTING_AGENT_MODEL", DEFAULT_MODEL)
-        self.api_base = api_base or os.getenv("SUBSETTING_AGENT_API_BASE", DEFAULT_API_BASE)
-        self.max_iterations = max_iterations
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.num_ctx = num_ctx
+        self.settings = settings or Settings()
+        self.model = self.settings.agent.model
+        self.api_base = self.settings.agent.api_base
+        self.max_iterations = self.settings.agent.max_iterations
+        self.max_tokens = self.settings.agent.max_tokens
+        self.temperature = self.settings.agent.temperature
+        self.num_ctx = self.settings.agent.num_ctx
         self._registry = registry
         self._services = services
-        self.document_cache_dir = document_cache_dir
 
         self.memory: list[dict[str, Any]] = []
 
@@ -209,20 +197,39 @@ class SubsettingAgent:
     # ------------------------------------------------------------------ #
 
     def _build_services(self, accession_files: list[Path]) -> ToolServices:
-        """Create the clients and stores for one turn from the environment.
+        """Create the clients and stores for one turn from the settings.
 
         Args:
             accession_files: Spreadsheets uploaded by the user; a non-empty list
                 switches the turn to file mode and skips the Genesys client.
         """
+        cfg = self.settings
+
         # In file mode no Genesys client is created: the API is not contacted at all.
-        genesys = None if accession_files else GenesysClient()
+        genesys = (
+            None
+            if accession_files
+            else GenesysClient(
+                cfg.genesys.base_url,
+                token=cfg.genesys.token,
+                timeout=cfg.genesys.timeout,
+                max_accessions=cfg.genesys.max_accessions,
+            )
+        )
 
         return ToolServices(
             genesys=genesys,
-            subsetting=SubsettingClient(),
-            documents=DocumentStore(self.document_cache_dir),
+            subsetting=SubsettingClient(
+                cfg.subsetting.base_url,
+                api_prefix=cfg.subsetting.api_prefix,
+                token=cfg.subsetting.token,
+                auth_scheme=cfg.subsetting.auth_scheme,
+                timeout=cfg.subsetting.timeout,
+            ),
+            documents=DocumentStore(cfg.storage.document_cache_dir),
             accession_files=accession_files,
+            grid=cfg.grid,
+            cellid_field=cfg.genesys.cellid_field,
         )
 
     @staticmethod
@@ -300,13 +307,9 @@ class SubsettingAgent:
         stalled_iterations = 0
         tools = registry.openai_tools()
 
-        print(f"Tools: {tools}")
-        print(f"Memory: {self.memory}")
         # Each iteration is one LLM call followed by the tool calls it requested.
         for iteration in range(1, self.max_iterations + 1):
             logger.debug("Agent iteration %s", iteration)
-            print("Agent iteration %s", iteration)
-            
 
             response = await acompletion(
                 model=self.model,
@@ -355,7 +358,7 @@ class SubsettingAgent:
                 tool_name = tool_call.function.name
                 tool_arguments = self._parse_tool_arguments(tool_call.function.arguments)
                 call_key = self._build_call_key(tool_name, tool_arguments)
-                print(f"Tool calling: {tool_name} with {tool_arguments}")
+
                 if call_key in executed_calls:
                     logger.warning("Repeated call to %s with %s", tool_name, tool_arguments)
                     result = {

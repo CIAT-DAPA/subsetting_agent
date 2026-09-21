@@ -7,7 +7,6 @@ from document_processing.pdf_converter import (
     build_cache_file_name,
     compute_document_id,
     convert_pdf_to_markdown,
-    default_cache_dir,
     find_cached_markdown,
 )
 
@@ -20,6 +19,5 @@ __all__ = [
     "build_cache_file_name",
     "compute_document_id",
     "convert_pdf_to_markdown",
-    "default_cache_dir",
     "find_cached_markdown",
 ]

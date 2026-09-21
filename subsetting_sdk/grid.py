@@ -7,14 +7,13 @@ repository::
     NCOLS 7198  NROWS 2000  XLLCORNER -180  YLLCORNER -50  CELLSIZE 0.05
 
 Cell ids follow R ``raster::cellFromXY``: 1-based, row-major, starting at the
-top-left corner (north-west). The grid parameters can be overridden with
-environment variables in case the deployed raster differs.
+top-left corner (north-west). The grid parameters are configured by the
+application (``config.Settings``) in case the deployed raster differs.
 """
 
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass
 
 
@@ -45,19 +44,6 @@ class GridSpec:
     def ymax(self) -> float:
         """Latitude of the northern edge."""
         return self.ymin + self.nrows * self.cellsize
-
-    @classmethod
-    def from_environment(cls) -> GridSpec:
-        """Build the grid from ``SUBSETTING_GRID_*`` variables, with raster defaults."""
-        defaults = cls()
-
-        return cls(
-            ncols=int(os.getenv("SUBSETTING_GRID_NCOLS", defaults.ncols)),
-            nrows=int(os.getenv("SUBSETTING_GRID_NROWS", defaults.nrows)),
-            xmin=float(os.getenv("SUBSETTING_GRID_XMIN", defaults.xmin)),
-            ymin=float(os.getenv("SUBSETTING_GRID_YMIN", defaults.ymin)),
-            cellsize=float(os.getenv("SUBSETTING_GRID_CELLSIZE", defaults.cellsize)),
-        )
 
     def contains(self, latitude: float, longitude: float) -> bool:
         """Whether a point falls inside the grid extent.
@@ -116,14 +102,12 @@ class GridSpec:
 DEFAULT_GRID = GridSpec()
 
 
-def cellid_from_coordinates(
-    latitude: float, longitude: float, grid: GridSpec | None = None
-) -> int | None:
+def cellid_from_coordinates(latitude: float, longitude: float, grid: GridSpec) -> int | None:
     """Compute the Subsetting API cell id of a collecting site.
 
     Args:
         latitude: Decimal degrees.
         longitude: Decimal degrees.
-        grid: Grid definition; the environment-configured grid when ``None``.
+        grid: Grid definition.
     """
-    return (grid or GridSpec.from_environment()).cellid(latitude, longitude)
+    return grid.cellid(latitude, longitude)

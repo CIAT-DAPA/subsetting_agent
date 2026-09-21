@@ -65,7 +65,7 @@ def mock_catalog(httpx_mock: HTTPXMock, indicators: list[dict], periods: list[di
 
 
 class TestUrlBuilding:
-    """Base URL, prefix and environment fallbacks compose the endpoint URL."""
+    """Base URL and prefix compose the endpoint URL."""
 
     def test_prefix_and_base_are_joined(self) -> None:
         """Trailing and leading slashes are normalized."""
@@ -79,20 +79,11 @@ class TestUrlBuilding:
 
         assert client._url("/cluster") == "https://h/api/cluster"
 
-    def test_environment_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Without arguments, configuration comes from environment variables."""
-        monkeypatch.setenv("SUBSETTING_API_URL", "https://env.example/x/")
-        monkeypatch.setenv("SUBSETTING_API_PREFIX", "")
-        monkeypatch.setenv("SUBSETTING_API_TIMEOUT", "5")
-        monkeypatch.setenv("SUBSETTING_API_TOKEN", "env-token")
-        monkeypatch.setenv("SUBSETTING_API_AUTH_SCHEME", "Bearer")
+    def test_explicit_auth_scheme(self) -> None:
+        """The scheme given by the caller is used in the header."""
+        client = SubsettingClient("https://h", token="t", auth_scheme="Bearer", max_retries=0)
 
-        client = SubsettingClient(max_retries=0)
-
-        assert client._url("/indicators") == "https://env.example/x/indicators"
-        assert client.timeout == 5.0
-        assert client.has_token
-        assert client._headers()["Authorization"] == "Bearer env-token"
+        assert client._headers()["Authorization"] == "Bearer t"
 
 
 class TestAuthentication:

@@ -11,7 +11,20 @@ import pytest
 
 import app as app_module
 from app import load_attachment_state, persist_attachments, split_attachments
-from storage import UploadError, UploadStore, content_hash, default_uploads_dir
+from config import Settings, StorageSettings
+from storage import UploadError, UploadStore, content_hash
+
+
+def settings_with_uploads(directory: Path) -> Settings:
+    """Return default settings whose uploads directory is ``directory``.
+
+    Args:
+        directory: Uploads directory for the test.
+    """
+    return Settings(
+        storage=StorageSettings(uploads_dir=directory, document_cache_dir=directory / "docs")
+    )
+
 
 STORED_NAME = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{12}\.(pdf|xlsx|csv)$")
 
@@ -73,14 +86,6 @@ class TestUploadStore:
         assert len(persisted) == 1
         assert len(errors) == 1
 
-    def test_default_directory_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``UPLOADS_DIR`` overrides the project default."""
-        monkeypatch.delenv("UPLOADS_DIR", raising=False)
-        assert default_uploads_dir() == Path("data") / "uploads"
-
-        monkeypatch.setenv("UPLOADS_DIR", "/srv/uploads")
-        assert default_uploads_dir() == Path("/srv/uploads")
-
 
 class TestAppAttachmentState:
     """The app persists new attachments once and keeps stable paths in state."""
@@ -140,13 +145,13 @@ class TestAppAttachmentState:
         gradio_dir.mkdir()
         sheet = gradio_dir / "list.xlsx"
         sheet.write_bytes(b"sheet")
-        monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+        monkeypatch.setattr(app_module, "SETTINGS", settings_with_uploads(tmp_path / "uploads"))
         captured: dict = {}
 
         class FakeAgent:
             """Agent double recording the paths it receives."""
 
-            def __init__(self, **kwargs) -> None:
+            def __init__(self, *args, **kwargs) -> None:
                 """Accept any configuration."""
                 self.memory = []
 

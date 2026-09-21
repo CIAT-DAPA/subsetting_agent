@@ -16,11 +16,7 @@ from collections import Counter
 from pathlib import Path
 
 from document_processing.models import ConvertedDocument, DocumentSection, SearchHit
-from document_processing.pdf_converter import (
-    PdfConversionError,
-    convert_pdf_to_markdown,
-    default_cache_dir,
-)
+from document_processing.pdf_converter import PdfConversionError, convert_pdf_to_markdown
 from subsetting_sdk.catalog import normalize_text
 
 logger = logging.getLogger(__name__)
@@ -56,7 +52,7 @@ class DocumentStore:
 
     def __init__(
         self,
-        cache_dir: str | Path | None = None,
+        cache_dir: str | Path,
         *,
         max_section_chars: int = DEFAULT_MAX_SECTION_CHARS,
         min_section_chars: int = DEFAULT_MIN_SECTION_CHARS,
@@ -64,7 +60,7 @@ class DocumentStore:
         """Create an empty store.
 
         Args:
-            cache_dir: Where conversions live; defaults to the module default.
+            cache_dir: Where conversions live (configured by the application).
             max_section_chars: Upper bound of a section in characters.
             min_section_chars: Sections shorter than this are merged forward.
 
@@ -76,7 +72,7 @@ class DocumentStore:
         if min_section_chars <= 0 or max_section_chars <= min_section_chars:
             raise ValueError("Expected 0 < min_section_chars < max_section_chars.")
 
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+        self.cache_dir = Path(cache_dir)
         self.max_section_chars = max_section_chars
         self.min_section_chars = min_section_chars
 
