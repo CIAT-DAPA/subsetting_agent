@@ -8,23 +8,30 @@ Gradio passes on every call. Two additions:
   spreadsheet (Excel/CSV). The paths of every file attached so far are collected
   from the history and handed to the agent, which decides the accession source:
   a spreadsheet means file mode, otherwise the Genesys API;
-* the accession selection (``AccessionContext``) is carried between turns in a
-  ``gr.State`` component through ``additional_inputs``/``additional_outputs``.
+* every attachment is copied once into a project-owned directory
+  (``UPLOADS_DIR``) under a stable name, because Gradio's own cache is
+  temporary; the stable paths travel between turns in a ``gr.State``;
+* the accession selection (``AccessionContext``) is carried between turns in
+  another ``gr.State`` through ``additional_inputs``/``additional_outputs``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
 from dotenv import load_dotenv
 
-from subsetting_agent import SubsettingAgent
-
+# ``.env`` must be loaded before importing Gradio so that GRADIO_TEMP_DIR is honoured.
 load_dotenv()
+
+import gradio as gr  # noqa: E402
+
+from storage.uploads import UploadError, UploadStore  # noqa: E402
+from subsetting_agent import SubsettingAgent  # noqa: E402
 
 SUBSETTING_AGENT_MODEL = os.getenv("SUBSETTING_AGENT_MODEL", "ollama_chat/llama3.1:8b")
 SUBSETTING_AGENT_API_BASE = os.getenv("SUBSETTING_AGENT_API_BASE", "http://localhost:11434")
@@ -173,8 +180,86 @@ def collect_attachments(history: list[dict[str, Any]], current_files: list[Any])
     return list(dict.fromkeys(paths))
 
 
+def load_attachment_state(attachments_json: str | None) -> dict[str, str]:
+    """Decode the ``{gradio_path: stable_path}`` map stored in the session state.
+
+    Args:
+        attachments_json: JSON object, or empty for a fresh session.
+    """
+    if not attachments_json or not attachments_json.strip():
+        return {}
+
+    try:
+        decoded = json.loads(attachments_json)
+
+    except json.JSONDecodeError:
+        logger.warning("Corrupted attachment state ignored: %s", attachments_json[:80])
+        return {}
+
+    if not isinstance(decoded, dict):
+        return {}
+
+    return {str(k): str(v) for k, v in decoded.items() if isinstance(v, str)}
+
+
+def persist_attachments(
+    history: list[dict[str, Any]],
+    current_files: list[Any],
+    attachments_json: str | None,
+    store: UploadStore | None = None,
+) -> tuple[list[str], list[str], str]:
+    """Copy new attachments into the upload store and merge them with the known ones.
+
+    The session state maps every Gradio path seen so far to its persisted copy,
+    so a file is hashed and copied only once, on the turn it is uploaded. Files
+    referenced by the history but absent from the state (e.g. a session
+    restored after a restart) are persisted when Gradio still has them.
+
+    Args:
+        history: OpenAI-style messages kept by Gradio.
+        current_files: ``files`` entry of the current multimodal message.
+        attachments_json: Session state with the path map so far.
+        store: Upload store; the default one when ``None``.
+
+    Returns:
+        The stable paths (oldest first, no duplicates), the error messages for
+        attachments that could not be persisted, and the updated session state.
+    """
+    store = store or UploadStore()
+    mapping = load_attachment_state(attachments_json)
+    errors: list[str] = []
+
+    # Only paths never seen in this session are persisted.
+    for candidate in collect_attachments(history, current_files):
+        if candidate in mapping:
+            continue
+
+        try:
+            mapping[candidate] = str(store.persist(candidate))
+
+        except UploadError as exc:
+            logger.warning("Skipping attachment %s: %s", candidate, exc)
+            errors.append(str(exc))
+
+    stable_paths = list(dict.fromkeys(mapping.values()))
+
+    return stable_paths, errors, json.dumps(mapping)
+
+
+def split_attachments(paths: list[str]) -> tuple[list[str], list[str]]:
+    """Separate PDFs from accession spreadsheets.
+
+    Args:
+        paths: Stable attachment paths.
+
+    Returns:
+        ``(pdf_paths, accession_file_paths)``.
+    """
+    return [p for p in paths if is_pdf(p)], [p for p in paths if is_accession_file(p)]
+
+
 def collect_pdf_paths(history: list[dict[str, Any]], current_files: list[Any]) -> list[str]:
-    """Collect the PDFs attached in the conversation.
+    """Collect the PDFs attached in the conversation (Gradio paths, not persisted).
 
     Args:
         history: OpenAI-style messages kept by Gradio.
@@ -186,7 +271,7 @@ def collect_pdf_paths(history: list[dict[str, Any]], current_files: list[Any]) -
 def collect_accession_file_paths(
     history: list[dict[str, Any]], current_files: list[Any]
 ) -> list[str]:
-    """Collect the accession spreadsheets attached in the conversation.
+    """Collect the accession spreadsheets attached in the conversation (Gradio paths).
 
     Args:
         history: OpenAI-style messages kept by Gradio.
@@ -213,21 +298,23 @@ async def chat(
     message: dict[str, Any] | str,
     history: list[dict[str, Any]],
     context_json: str,
-) -> tuple[str, str]:
+    attachments_json: str = "",
+) -> tuple[str, str, str]:
     """Handle one chat turn.
 
     A new agent is created per call so nothing is shared between users; the
-    session lives in the history Gradio keeps per browser and in the
-    ``context_json`` state.
+    session lives in the history Gradio keeps per browser and in the two state
+    values (selection and persisted attachments).
 
     Args:
         message: Multimodal message ``{"text": ..., "files": [...]}`` (or a
             plain string when multimodal input is disabled).
         history: OpenAI-style messages of the conversation so far.
         context_json: Serialized accession selection from the previous turn.
+        attachments_json: Stable paths of the attachments persisted so far.
 
     Returns:
-        The assistant answer and the updated serialized selection.
+        The assistant answer, the updated selection and the updated attachments.
     """
     # Normalize both message shapes into text plus files.
     if isinstance(message, dict):
@@ -238,8 +325,19 @@ async def chat(
         text = str(message or "")
         files = []
 
-    document_paths = collect_pdf_paths(history, files)
-    accession_file_paths = collect_accession_file_paths(history, files)
+    attachments, upload_errors = [], []
+
+    # Attachments are copied to durable storage before anything reads them.
+    try:
+        attachments, upload_errors, attachments_json = persist_attachments(
+            history, files, attachments_json
+        )
+
+    except Exception:  # noqa: BLE001 - storage problems must not kill the turn
+        logger.exception("Could not persist attachments")
+        upload_errors = ["Attachments could not be stored; please try uploading again."]
+
+    document_paths, accession_file_paths = split_attachments(attachments)
 
     # A message with only attachments still deserves an answer.
     if not text.strip() and accession_file_paths:
@@ -265,22 +363,28 @@ async def chat(
         return (
             "Something went wrong while processing your request. Please try again or rephrase it.",
             context_json,
+            attachments_json,
         )
 
-    return turn.answer + format_document_errors(turn.document_errors), turn.context_json
+    return (
+        turn.answer + format_document_errors([*upload_errors, *turn.document_errors]),
+        turn.context_json,
+        attachments_json,
+    )
 
 
 def build_app() -> gr.Blocks:
     """Create the Gradio application."""
     with gr.Blocks(title="Genesys Subsetting Assistant") as demo:
-        # Serialized AccessionContext carried between turns, per browser session.
+        # Serialized AccessionContext and persisted attachment paths, per browser session.
         selection_state = gr.State("")
+        attachments_state = gr.State("")
 
         gr.ChatInterface(
             fn=chat,
             multimodal=True,
-            additional_inputs=[selection_state],
-            additional_outputs=[selection_state],
+            additional_inputs=[selection_state, attachments_state],
+            additional_outputs=[selection_state, attachments_state],
             title="Genesys Subsetting Assistant",
             description=(
                 "Build subsets of genebank accessions from passport data, traits, your own "

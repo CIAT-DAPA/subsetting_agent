@@ -306,7 +306,6 @@ class SubsettingAgent:
         for iteration in range(1, self.max_iterations + 1):
             logger.debug("Agent iteration %s", iteration)
             print("Agent iteration %s", iteration)
-            print("Agent iteration %s", iteration)
             
 
             response = await acompletion(
@@ -356,7 +355,7 @@ class SubsettingAgent:
                 tool_name = tool_call.function.name
                 tool_arguments = self._parse_tool_arguments(tool_call.function.arguments)
                 call_key = self._build_call_key(tool_name, tool_arguments)
-
+                print(f"Tool calling: {tool_name} with {tool_arguments}")
                 if call_key in executed_calls:
                     logger.warning("Repeated call to %s with %s", tool_name, tool_arguments)
                     result = {

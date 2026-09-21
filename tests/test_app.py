@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -114,8 +116,17 @@ class TestHistoryHelpers:
 class TestChatHandler:
     """The handler wires history, files and state into the agent."""
 
-    async def test_chat_passes_state_and_files(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The agent receives memory, PDFs and context; its outputs are returned."""
+    async def test_chat_passes_state_and_files(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The agent receives memory, persisted PDFs/sheets and context; outputs are returned."""
+        monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+        paper = tmp_path / "paper.pdf"
+        new_pdf = tmp_path / "new.pdf"
+        sheet = tmp_path / "list.xlsx"
+        paper.write_bytes(b"paper")
+        new_pdf.write_bytes(b"new")
+        sheet.write_bytes(b"sheet")
         captured: dict = {}
 
         class FakeAgent:
@@ -142,26 +153,31 @@ class TestChatHandler:
         history = [
             {"role": "user", "content": "earlier"},
             {"role": "assistant", "content": "ok"},
-            {"role": "user", "content": {"path": "/paper.pdf"}},
+            {"role": "user", "content": {"path": str(paper)}},
         ]
 
-        answer, state = await chat(
-            {"text": "now", "files": ["/new.pdf", "/list.xlsx"]}, history, "{}"
+        answer, state, attachments = await chat(
+            {"text": "now", "files": [str(new_pdf), str(sheet)]}, history, "{}", ""
         )
 
         assert answer.startswith("done")
         assert "bad.pdf" in answer
         assert state == '{"stage": "passport"}'
         assert captured["text"] == "now"
-        assert captured["documents"] == ["/paper.pdf", "/new.pdf"]
-        assert captured["accession_files"] == ["/list.xlsx"]
+        assert [Path(p).suffix for p in captured["documents"]] == [".pdf", ".pdf"]
+        assert [Path(p).suffix for p in captured["accession_files"]] == [".xlsx"]
+        assert all(Path(p).parent == tmp_path / "uploads" for p in captured["documents"])
+        assert set(json.loads(attachments)) == {str(paper), str(new_pdf), str(sheet)}
         assert captured["context"] == "{}"
         assert [m["content"] for m in captured["memory"]] == ["earlier", "ok"]
 
     async def test_attachment_only_message_gets_default_text(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A message with a PDF and no text still reaches the agent."""
+        monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
+        paper = tmp_path / "paper.pdf"
+        paper.write_bytes(b"paper")
         captured: dict = {}
 
         class FakeAgent:
@@ -178,7 +194,7 @@ class TestChatHandler:
 
         monkeypatch.setattr(app_module, "SubsettingAgent", FakeAgent)
 
-        await chat({"text": "", "files": ["/paper.pdf"]}, [], "")
+        await chat({"text": "", "files": [str(paper)]}, [], "", "")
 
         assert "attached a document" in captured["text"]
 
@@ -198,7 +214,8 @@ class TestChatHandler:
 
         monkeypatch.setattr(app_module, "SubsettingAgent", BrokenAgent)
 
-        answer, state = await chat("hello", [], "previous")
+        answer, state, attachments = await chat("hello", [], "previous", "{}")
 
         assert "Something went wrong" in answer
         assert state == "previous"
+        assert attachments == "{}"

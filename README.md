@@ -19,9 +19,9 @@ information, always in this order:
 The agent is served through a Gradio chat interface and follows the same
 tool-calling loop as the AClimate "Melisa" agent (litellm + local LLM).
 
-> **Status:** all blocks are implemented and unit-tested (214 tests, no
-> network): SDKs, document processing, accession spreadsheets, tools, system
-> prompt, agent and Gradio app. Next: validation against the real Genesys
+> **Status:** all blocks are implemented and unit-tested (223 tests, no
+> network): SDKs, document processing, accession spreadsheets, upload storage,
+> tools, system prompt, agent and Gradio app. Next: validation against the real Genesys
 > sandbox with an API token.
 
 ---
@@ -46,6 +46,8 @@ subsetting_agent/
 │   └── exceptions.py
 ├── accession_files/            # User spreadsheets with accession ids + coordinates
 │   └── reader.py               #   read_accession_file: column detection, validation, cellid
+├── storage/                    # Durable copies of every attachment
+│   └── uploads.py              #   UploadStore: YYYYMMDD_HHmmss_<hash>.<ext> under UPLOADS_DIR
 ├── document_processing/        # PDF -> Markdown -> searchable sections
 │   ├── pdf_converter.py        #   convert_pdf_to_markdown (cached on disk)
 │   ├── document_store.py       #   DocumentStore: sections, outline, lexical search
@@ -135,7 +137,18 @@ uv run python app.py           # http://localhost:7860
 
 The chat accepts text, PDF attachments and one accession spreadsheet
 (`.xlsx`, `.xls`, `.csv`, `.tsv`). Attaching a spreadsheet switches the whole
-conversation to file mode (see *Two accession sources*). Every PDF attached during the
+conversation to file mode (see *Two accession sources*).
+
+### Where uploaded files live
+
+Gradio stores attachments in its own temporary cache (`GRADIO_TEMP_DIR`), which
+is cleaned on restart. To make conversations robust, `app.py` copies every new
+attachment once into `UPLOADS_DIR` under the name
+`YYYYMMDD_HHmmss_<sha256[:12]>.<ext>` (identical content is stored once) and
+keeps a `{gradio_path: stored_path}` map in a `gr.State`, so later turns read
+the stored copies and never touch Gradio's cache again. PDF conversions go to
+`DOCUMENT_CACHE_DIR` with the same naming scheme. The `data/` folder is
+git-ignored. Every PDF attached during the
 conversation stays available to the agent (converted once and cached). The
 accession selection persists across turns inside the browser session; opening
 a new tab starts a fresh conversation. Nothing is shared between users.
@@ -173,7 +186,9 @@ app). Defaults are shown in `.env.example`.
 | `SUBSETTING_API_TIMEOUT` | `120` | Per-request timeout (clustering can be slow) |
 | `SUBSETTING_API_TOKEN` | *(empty)* | API token for the deployed Subsetting API (request it at the API URL); required in production |
 | `SUBSETTING_API_AUTH_SCHEME` | `API-Token` | Scheme placed before the token in the `Authorization` header |
-| `DOCUMENT_CACHE_DIR` | `<system temp>/subsetting_agent_documents` | Where PDF conversions are cached |
+| `UPLOADS_DIR` | `data/uploads` | Durable copies of every attachment (PDF, Excel/CSV) |
+| `DOCUMENT_CACHE_DIR` | `data/documents` (in `.env.example`; code default is the system temp dir) | Where PDF conversions are cached |
+| `GRADIO_TEMP_DIR` | `data/gradio_tmp` | Gradio's own temporary upload cache |
 | `SUBSETTING_AGENT_MODEL` | `ollama_chat/llama3.1:8b` | litellm model name |
 | `SUBSETTING_AGENT_API_BASE` | `http://localhost:11434` | LLM endpoint |
 | `SUBSETTING_AGENT_HOST` / `_PORT` | `localhost` / `7860` | Gradio server |
@@ -226,13 +241,18 @@ The SDK deliberately exposes only the two operations the agent needs.
 ```python
 import asyncio
 from subsetting_sdk import (
-    ClusteringAlgorithm, ClusterRequest, CropCellIds, IndicatorCatalog, SubsettingClient,
+    ClusteringAlgorithm,
+    ClusterRequest,
+    CropCellIds,
+    IndicatorCatalog,
+    SubsettingClient,
 )
 
+
 async def main() -> None:
-    async with SubsettingClient() as subsetting:          # token from SUBSETTING_API_TOKEN
-        catalog = await IndicatorCatalog.from_client(subsetting)   # one call: get_indicators()
-        print(catalog.category_names())   # e.g. Drought stress, Heat stress, ...
+    async with SubsettingClient() as subsetting:  # token from SUBSETTING_API_TOKEN
+        catalog = await IndicatorCatalog.from_client(subsetting)  # one call: get_indicators()
+        print(catalog.category_names())  # e.g. Drought stress, Heat stress, ...
 
         # Resolve human names into validated filters with the right dataset ids.
         precipitation = catalog.build_filter("total precipitation", months=(5, 9))
@@ -247,8 +267,9 @@ async def main() -> None:
                 algorithms=[ClusteringAlgorithm.AGGLOMERATIVE],
             )
         )
-        print(result.clusters(crop="bean"))          # {0: [101, 102], 1: [103], ...}
-        print(result.cluster_statistics())           # {0: {"prec": {"mean": ..., "min": ..., "max": ...}}}
+        print(result.clusters(crop="bean"))  # {0: [101, 102], 1: [103], ...}
+        print(result.cluster_statistics())  # {0: {"prec": {"mean": ..., "min": ..., "max": ...}}}
+
 
 asyncio.run(main())
 ```
