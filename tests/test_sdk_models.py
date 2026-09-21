@@ -14,7 +14,6 @@ from subsetting_sdk.models import (
     IndicatorFilter,
     IndicatorType,
     MonthWindow,
-    SubsetResult,
 )
 
 
@@ -68,29 +67,18 @@ class TestIndicatorFilter:
                 type=IndicatorType.SPECIFIC, name="Days optimal", indicator_periods=["abc"]
             )
 
-    def test_inverted_range_is_rejected(self) -> None:
-        """A range whose min exceeds its max is invalid."""
-        with pytest.raises(ValidationError, match="min is greater than max"):
-            IndicatorFilter(
-                type=IndicatorType.GENERIC,
-                name="Total precipitation",
-                indicator_periods=["abc"],
-                range=(100.0, 10.0),
-            )
-
     def test_at_least_one_period_is_required(self) -> None:
         """An empty period list cannot be sent to the API."""
         with pytest.raises(ValidationError):
             IndicatorFilter(type=IndicatorType.GENERIC, name="x", indicator_periods=[])
 
     def test_to_api_uses_api_key_names(self) -> None:
-        """Period ids go under ``indicator`` and the range is a list."""
+        """Period ids go under ``indicator`` and months are a ``[low, up]`` list."""
         payload = IndicatorFilter(
             type=IndicatorType.GENERIC,
             name="Total precipitation",
             indicator_periods=["p1"],
             months=MonthWindow(start=5, end=9),
-            range=(100.0, 500.0),
         ).to_api()
 
         assert payload == {
@@ -98,16 +86,14 @@ class TestIndicatorFilter:
             "name": "Total precipitation",
             "indicator": ["p1"],
             "months": [5, 9],
-            "range": [100.0, 500.0],
         }
 
-    def test_to_api_omits_missing_range_and_includes_crop(self) -> None:
-        """Without a range the key is absent; specific filters carry their crop."""
+    def test_to_api_includes_crop_for_specific(self) -> None:
+        """Specific filters carry their crop."""
         payload = IndicatorFilter(
             type=IndicatorType.SPECIFIC, name="Days optimal", indicator_periods=["p"], crop="Bean"
         ).to_api()
 
-        assert "range" not in payload
         assert payload["crop"] == "Bean"
 
 
@@ -195,21 +181,29 @@ class TestClusterResult:
         assert ClusterResult.from_api({}).rows == []
 
 
-class TestSubsetResult:
-    """The subset response uses the singular ``cellid`` key for lists."""
+class TestClusterStatistics:
+    """Per-cluster indicator statistics are pooled from the value columns."""
 
-    def test_parses_filtered_cellids_alias(self) -> None:
-        """``filtered_cellids[].cellid`` is mapped to ``filtered[].cellids``."""
-        result = SubsetResult.model_validate(
-            {
-                "filtered_cellids": [
-                    {"crop": "bean", "cellid": [1, 2]},
-                    {"crop": "maize", "cellid": [2, 3]},
-                ],
-                "quantile": [],
-                "proportion": [],
-            }
-        )
+    def test_statistics_per_cluster(self, cluster_payload: dict) -> None:
+        """Monthly columns sharing a prefix are pooled; None values are skipped."""
+        result = ClusterResult.from_api(cluster_payload)
 
-        assert result.filtered[0].cellids == [1, 2]
-        assert result.all_cellids() == [1, 2, 3]
+        stats = result.cluster_statistics()
+
+        # Cluster 0 pools 101 (10, 12.5), 102 (11) and 201 (50, 55).
+        assert stats[0]["prec"]["n"] == 5
+        assert stats[0]["prec"]["min"] == 10.0
+        assert stats[0]["prec"]["max"] == 55.0
+        assert stats[1]["prec"] == {"mean": 85.0, "min": 80.0, "max": 90.0, "n": 2.0}
+
+    def test_statistics_filtered_by_crop_and_noise_excluded(self, cluster_payload: dict) -> None:
+        """Crop filtering applies and DBSCAN noise rows are ignored."""
+        result = ClusterResult.from_api(cluster_payload)
+
+        maize = result.cluster_statistics(crop="maize")
+        dbscan = result.cluster_statistics(ClusteringAlgorithm.DBSCAN)
+
+        assert list(maize) == [0]
+        assert maize[0]["prec"]["mean"] == 52.5
+        assert -1 not in dbscan
+        assert dbscan[0]["prec"]["n"] == 4  # 101 (2 values) + 201 (2 values); 102 is noise

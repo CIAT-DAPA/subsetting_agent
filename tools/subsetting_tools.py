@@ -1,4 +1,4 @@
-"""Tools backed by the Subsetting API: climate indicators, filtering and clustering.
+"""Tools backed by the Subsetting API: climate indicators and clustering.
 
 These tools operate exclusively on the cellids of the accessions already in the
 selection, which is how the business order (climate last) is enforced by data.
@@ -8,11 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from subsetting_sdk.exceptions import (
-    IndicatorNotFoundError,
-    IndicatorPeriodNotFoundError,
-    NoMatchingDataError,
-)
+from subsetting_sdk.exceptions import IndicatorNotFoundError, IndicatorPeriodNotFoundError
 from subsetting_sdk.models import (
     ClusteringAlgorithm,
     ClusteringHyperparameters,
@@ -78,8 +74,6 @@ async def _build_filters(
     services: ToolServices,
     indicators: list[str],
     window: MonthWindow,
-    *,
-    value_range: tuple[float, float] | None = None,
 ) -> tuple[list[IndicatorFilter], str | None]:
     """Resolve indicator names into API filters for the crops of the selection.
 
@@ -87,7 +81,6 @@ async def _build_filters(
         services: Shared services.
         indicators: Indicator names, codes or ids.
         window: Month window applied to monthly indicators.
-        value_range: Range applied to every filter (``/subset`` only).
 
     Returns:
         The filters and an error message when a name cannot be resolved.
@@ -100,72 +93,12 @@ async def _build_filters(
     for name in indicators:
         try:
             crop_hint = crops[0] if len(crops) == 1 else None
-            filters.append(
-                catalog.build_filter(name, crop=crop_hint, months=window, value_range=value_range)
-            )
+            filters.append(catalog.build_filter(name, crop=crop_hint, months=window))
 
         except (IndicatorNotFoundError, IndicatorPeriodNotFoundError) as exc:
             return [], str(exc)
 
     return filters, None
-
-
-async def filter_selection_by_climate(
-    services: ToolServices,
-    *,
-    indicator: str,
-    min_value: float,
-    max_value: float,
-    month_start: int | None = None,
-    month_end: int | None = None,
-) -> dict[str, Any]:
-    """Keep accessions whose collecting site has an indicator inside a range.
-
-    Args:
-        services: Shared services.
-        indicator: Indicator name or code (see ``list_climate_indicators``).
-        min_value: Lower bound of the aggregated indicator value.
-        max_value: Upper bound of the aggregated indicator value.
-        month_start: First month of the window (1-12); default January.
-        month_end: Last month of the window (1-12); default December.
-    """
-    context = services.context
-
-    # Climate is the last stage: a selection with coordinates must exist.
-    if context.is_empty:
-        return {"error": "No accessions selected yet. Run select_accessions first."}
-
-    cellid_list = context.cellids_by_crop()
-
-    if not cellid_list:
-        return {"error": "None of the selected accessions has a grid cell (no coordinates)."}
-
-    window = _month_window(month_start, month_end)
-    filters, error = await _build_filters(
-        services, [indicator], window, value_range=(float(min_value), float(max_value))
-    )
-
-    if error:
-        return {"error": error}
-
-    try:
-        result = await services.subsetting.filter_subset(cellid_list, filters)
-
-    except NoMatchingDataError:
-        return {
-            "kept": 0,
-            "message": "No accession site satisfies this range. The selection was not changed.",
-            "summary": context.summary(),
-        }
-
-    kept_records = context.accessions_in_cells(result.all_cellids())
-    description = (
-        f"Climate: {filters[0].name} in [{min_value}, {max_value}] "
-        f"months {window.start}-{window.end}"
-    )
-    context.keep([r.uuid for r in kept_records], stage=Stage.CLIMATE, description=description)
-
-    return {"kept": len(kept_records), "summary": context.summary()}
 
 
 async def cluster_selection_by_climate(
@@ -232,11 +165,13 @@ async def cluster_selection_by_climate(
         }
 
     clusters = result.clusters(chosen, include_noise=False)
+    statistics = result.cluster_statistics(chosen)
     context.set_clusters(clusters, chosen.value)
 
     cluster_report = []
 
-    # Describe each cluster with its size and a few example accessions.
+    # Describe each cluster with its size, examples and indicator statistics so
+    # the model can compare clusters against the user's thresholds.
     for label, cells in clusters.items():
         members = context.accessions_in_cells(cells)
         cluster_report.append(
@@ -246,6 +181,7 @@ async def cluster_selection_by_climate(
                 "accessions": len(members),
                 "countries": _top_countries(members),
                 "examples": [m.label() for m in members[:3]],
+                "indicators": statistics.get(label, {}),
             }
         )
 
@@ -254,8 +190,10 @@ async def cluster_selection_by_climate(
         "indicators": [f.name for f in filters],
         "months": [window.start, window.end],
         "clusters": cluster_report,
-        "statistics": result.summary[:20],
-        "hint": "Use pick_cluster with a cluster label to keep only its accessions.",
+        "hint": (
+            "Indicator statistics are per cluster (mean/min/max of the monthly values in the "
+            "window). Use pick_cluster with a cluster label to keep only its accessions."
+        ),
     }
 
 

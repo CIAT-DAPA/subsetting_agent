@@ -1,9 +1,8 @@
 """Exception hierarchy for the Subsetting API SDK.
 
 Every error raised by the SDK derives from :class:`SubsettingApiError` so callers
-can catch a single base class, while still being able to react to the specific
-business errors the API reports (no matching data, core collection too small,
-unknown indicator name).
+can catch a single base class while still reacting to authentication failures
+and catalog lookups that fail.
 """
 
 from __future__ import annotations
@@ -18,8 +17,7 @@ class SubsettingApiError(Exception):
         message: Human readable description of the failure.
         status_code: HTTP status returned by the API, if the error came from an
             HTTP response. ``None`` for client-side or network errors.
-        response_body: Raw body returned by the API, if any. Kept to help with
-            debugging since the Flask API returns plain-text error messages.
+        response_body: Raw body returned by the API, if any.
     """
 
     def __init__(
@@ -55,20 +53,8 @@ class SubsettingConnectionError(SubsettingApiError):
     """Raised when the API cannot be reached (DNS, timeout, connection reset)."""
 
 
-class NoMatchingDataError(SubsettingApiError):
-    """Raised when ``/subset`` finds no cell that satisfies the indicator filters.
-
-    The API reports this case as an HTTP 400 with the text
-    ``"Bad request! No data matching the selected filters!"``.
-    """
-
-
-class CoreCollectionError(SubsettingApiError):
-    """Raised when ``/core-collection`` cannot be computed.
-
-    The API reports this case as an HTTP 422, typically because the requested
-    ``amount`` is larger than the number of available cells.
-    """
+class SubsettingAuthError(SubsettingApiError):
+    """Raised on HTTP 401/403: missing, invalid or insufficient API token."""
 
 
 class IndicatorNotFoundError(SubsettingApiError):

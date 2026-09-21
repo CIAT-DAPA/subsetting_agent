@@ -358,37 +358,11 @@ def build_full_registry() -> ToolRegistry:
     )
     registry.register(
         ToolSpec(
-            name="filter_selection_by_climate",
-            description=(
-                "Keep selected accessions whose collecting site has an indicator value inside "
-                "[min_value, max_value] over a month window. Requires an existing selection."
-            ),
-            parameters=_schema(
-                {
-                    "indicator": {"type": "string", "description": "Indicator name or code."},
-                    "min_value": {"type": "number", "description": "Lower bound."},
-                    "max_value": {"type": "number", "description": "Upper bound."},
-                    "month_start": {
-                        "type": "integer",
-                        "description": "First month 1-12 (default 1).",
-                    },
-                    "month_end": {
-                        "type": "integer",
-                        "description": "Last month 1-12 (default 12).",
-                    },
-                },
-                required=["indicator", "min_value", "max_value"],
-            ),
-            handler=subsetting_tools.filter_selection_by_climate,
-            stage="climate",
-        )
-    )
-    registry.register(
-        ToolSpec(
             name="cluster_selection_by_climate",
             description=(
                 "Group the selected accessions into climate clusters using one or more "
-                "indicators. Requires an existing selection. Follow with pick_cluster."
+                "indicators, and report each cluster's indicator statistics. Requires an "
+                "existing selection. Follow with pick_cluster to keep one cluster."
             ),
             parameters=_schema(
                 {

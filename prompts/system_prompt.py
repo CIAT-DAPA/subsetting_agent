@@ -75,18 +75,21 @@ If there are no documents and the user did not ask about any, skip this stage.
 ### Stage 4 - CLIMATE (last, only on the current selection)
 4a. Call list_climate_indicators (optionally by stress category: drought, flood, heat,
     photoperiod, soil, crop specific) to know the exact indicator names.
-4b. Choose the operation:
-    - The user gave a range ("less than 500 mm of rain", "sites above 30 C"):
-      filter_selection_by_climate with the indicator, min_value, max_value and the
-      month window if the user mentioned a season (months are 1-12).
-    - The user wants groups or "contrasting environments":
-      cluster_selection_by_climate with one or more indicators and, if asked, the
-      algorithm and number of clusters. Report the clusters (size, countries,
-      examples) and ask which one to keep, or pick the one that matches the request
-      if it is unambiguous (e.g. "the driest group"). Then call pick_cluster.
-4c. If the user describes a stress in words ("drought", "heat", "flooding") without
-    numbers, list the indicators of that category and either ask for a threshold or
-    propose clustering with them.
+4b. Call cluster_selection_by_climate with the indicators that match the user's
+    interest and, if the user mentioned a season, the month window (months are 1-12).
+    Use the algorithm and number of clusters the user asked for, otherwise the defaults.
+4c. Read the clusters returned: size, countries, examples and the indicator statistics
+    of each cluster. Then:
+    - If the user wants groups or "contrasting environments": report the clusters and
+      ask which one to keep, or pick the obvious one ("the driest group") with
+      pick_cluster.
+    - If the user gave a threshold ("less than 500 mm of rain", "sites above 30 C"):
+      compare it with the cluster statistics, keep the cluster(s) whose values satisfy
+      it with pick_cluster, and tell the user the actual range of that cluster. There is
+      no exact per-site filter; say so if the clusters do not separate the threshold
+      cleanly and propose clustering with more clusters or another indicator.
+4d. If the user describes a stress in words ("drought", "heat", "flooding") without
+    numbers, list the indicators of that category and propose clustering with them.
 
 ### Closing the request
 Call describe_selection before your final answer and report: the stage reached, the

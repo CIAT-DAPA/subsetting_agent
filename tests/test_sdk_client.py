@@ -10,9 +10,8 @@ from pytest_httpx import HTTPXMock
 
 from subsetting_sdk.client import SubsettingClient
 from subsetting_sdk.exceptions import (
-    CoreCollectionError,
-    NoMatchingDataError,
     SubsettingApiError,
+    SubsettingAuthError,
     SubsettingConnectionError,
 )
 from subsetting_sdk.models import (
@@ -34,23 +33,35 @@ def make_client(**kwargs) -> SubsettingClient:
     """
     kwargs.setdefault("max_retries", 0)
     kwargs.setdefault("backoff_seconds", 0.0)
+    kwargs.setdefault("token", "")
 
     return SubsettingClient(BASE, api_prefix="/api/v1", **kwargs)
 
 
-def generic_filter(value_range: tuple[float, float] | None = (0.0, 1000.0)) -> IndicatorFilter:
-    """Build a generic precipitation filter for request tests.
-
-    Args:
-        value_range: Range to attach, or ``None`` to omit it.
-    """
+def generic_filter() -> IndicatorFilter:
+    """Build a generic precipitation filter for request tests."""
     return IndicatorFilter(
         type=IndicatorType.GENERIC,
         name="Total precipitation",
         indicator_periods=["64a000000000000000000001"],
         months=MonthWindow(start=1, end=12),
-        range=value_range,
     )
+
+
+def mock_catalog(httpx_mock: HTTPXMock, indicators: list[dict], periods: list[dict]) -> None:
+    """Register both catalog endpoints on the mock.
+
+    Args:
+        httpx_mock: Active HTTP mock.
+        indicators: Body of ``/indicators``.
+        periods: Body of ``/indicator-period``.
+    """
+    httpx_mock.add_response(
+        url=f"{BASE}/api/v1/indicators",
+        content=json.dumps(indicators).encode(),
+        headers={"content-type": "text/html; charset=utf-8"},
+    )
+    httpx_mock.add_response(url=f"{BASE}/api/v1/indicator-period", json=periods)
 
 
 class TestUrlBuilding:
@@ -60,41 +71,99 @@ class TestUrlBuilding:
         """Trailing and leading slashes are normalized."""
         client = SubsettingClient("https://h/api/", api_prefix="api/v1/", max_retries=0)
 
-        assert client._url("/subset") == "https://h/api/api/v1/subset"
+        assert client._url("/cluster") == "https://h/api/api/v1/cluster"
 
     def test_empty_prefix_is_allowed(self) -> None:
         """An empty prefix means the proxy strips ``/api/v1``."""
         client = SubsettingClient("https://h/api", api_prefix="", max_retries=0)
 
-        assert client._url("/subset") == "https://h/api/subset"
+        assert client._url("/cluster") == "https://h/api/cluster"
 
     def test_environment_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without arguments, configuration comes from environment variables."""
         monkeypatch.setenv("SUBSETTING_API_URL", "https://env.example/x/")
         monkeypatch.setenv("SUBSETTING_API_PREFIX", "")
         monkeypatch.setenv("SUBSETTING_API_TIMEOUT", "5")
+        monkeypatch.setenv("SUBSETTING_API_TOKEN", "env-token")
+        monkeypatch.setenv("SUBSETTING_API_AUTH_SCHEME", "Bearer")
 
         client = SubsettingClient(max_retries=0)
 
         assert client._url("/indicators") == "https://env.example/x/indicators"
         assert client.timeout == 5.0
+        assert client.has_token
+        assert client._headers()["Authorization"] == "Bearer env-token"
 
 
-class TestCatalogEndpoints:
-    """GET endpoints return typed lists even when served as ``text/html``."""
+class TestAuthentication:
+    """The API token travels in the Authorization header when configured."""
 
-    async def test_get_indicators_parses_string_body(
-        self, httpx_mock: HTTPXMock, indicators_payload: list[dict]
+    async def test_token_header_default_scheme(self, httpx_mock: HTTPXMock) -> None:
+        """The default scheme is ``API-Token``, like the Genesys API."""
+        mock_catalog(httpx_mock, [], [])
+
+        async with make_client(token="secret") as client:
+            await client.get_indicators()
+
+        for request in httpx_mock.get_requests():
+            assert request.headers["Authorization"] == "API-Token secret"
+
+    async def test_no_token_sends_no_header(self, httpx_mock: HTTPXMock) -> None:
+        """Without a token the header is absent (anonymous access)."""
+        mock_catalog(httpx_mock, [], [])
+
+        async with make_client(token="") as client:
+            await client.get_indicators()
+
+        assert "Authorization" not in httpx_mock.get_requests()[0].headers
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_auth_failure_without_token_hints_variable(
+        self, httpx_mock: HTTPXMock, status: int
     ) -> None:
-        """``/indicators`` returns ``json.dumps`` text; it is decoded anyway."""
+        """401/403 without a token name the environment variable to set."""
         httpx_mock.add_response(
-            url=f"{BASE}/api/v1/indicators",
-            content=json.dumps(indicators_payload).encode(),
-            headers={"content-type": "text/html; charset=utf-8"},
+            url=f"{BASE}/api/v1/indicators", status_code=status, text="Forbidden"
         )
+
+        async with make_client(token="") as client:
+            with pytest.raises(SubsettingAuthError, match="SUBSETTING_API_TOKEN") as info:
+                await client.get_indicators()
+
+        assert info.value.status_code == status
+
+    async def test_auth_failure_with_token_hints_scheme(self, httpx_mock: HTTPXMock) -> None:
+        """403 with a token points at the token and the scheme."""
+        httpx_mock.add_response(url=f"{BASE}/api/v1/indicators", status_code=403, text="Forbidden")
+
+        async with make_client(token="bad") as client:
+            with pytest.raises(SubsettingAuthError, match="SUBSETTING_API_AUTH_SCHEME"):
+                await client.get_indicators()
+
+    async def test_auth_failure_is_not_retried(self, httpx_mock: HTTPXMock) -> None:
+        """A 403 is final even when retries are enabled."""
+        httpx_mock.add_response(url=f"{BASE}/api/v1/indicators", status_code=403, text="Forbidden")
+
+        async with make_client(max_retries=3) as client:
+            with pytest.raises(SubsettingAuthError):
+                await client.get_indicators()
+
+        assert len(httpx_mock.get_requests()) == 1
+
+
+class TestGetIndicators:
+    """``get_indicators`` merges the catalog with the datasets of each indicator."""
+
+    async def test_periods_are_attached(
+        self, httpx_mock: HTTPXMock, indicators_payload: list[dict], periods_payload: list[dict]
+    ) -> None:
+        """Every indicator receives its periods; the text/html body is decoded."""
+        mock_catalog(httpx_mock, indicators_payload, periods_payload)
 
         async with make_client() as client:
             categories = await client.get_indicators()
+
+        by_id = {i.id: i for c in categories for i in c.indicators}
 
         assert [c.category for c in categories] == [
             "Drought stress",
@@ -102,97 +171,49 @@ class TestCatalogEndpoints:
             "Crop specific",
             "Soil properties",
         ]
-        assert categories[2].indicators[0].indicator_type is IndicatorType.SPECIFIC
+        assert {p.ssp for p in by_id["prec"].periods} == {"historical", "ssp245"}
+        assert [p.id for p in by_id["tmax"].periods] == ["64a000000000000000000003"]
+        assert by_id["opt_bean"].indicator_type is IndicatorType.SPECIFIC
 
-    async def test_get_indicator_periods(
-        self, httpx_mock: HTTPXMock, periods_payload: list[dict]
+    async def test_indicator_without_periods(
+        self, httpx_mock: HTTPXMock, indicators_payload: list[dict]
     ) -> None:
-        """``/indicator-period`` rows map to :class:`IndicatorPeriod`."""
-        httpx_mock.add_response(url=f"{BASE}/api/v1/indicator-period", json=periods_payload)
+        """Indicators missing from ``/indicator-period`` keep an empty list."""
+        mock_catalog(httpx_mock, indicators_payload, [])
 
         async with make_client() as client:
-            periods = await client.get_indicator_periods()
+            categories = await client.get_indicators()
 
-        assert len(periods) == len(periods_payload)
-        assert periods[1].ssp == "ssp245"
-
-
-class TestSubsetEndpoint:
-    """``/subset`` sends the expected body and maps its 400 to a business error."""
-
-    async def test_request_body_and_response(self, httpx_mock: HTTPXMock) -> None:
-        """The body uses ``cellid_list`` and ``data``; the response is typed."""
-        httpx_mock.add_response(
-            url=f"{BASE}/api/v1/subset",
-            json={
-                "filtered_cellids": [{"crop": "bean", "cellid": [1]}],
-                "quantile": [],
-                "proportion": [],
-            },
-        )
-
-        async with make_client() as client:
-            result = await client.filter_subset(
-                [CropCellIds(crop="bean", cellids=[1, 2])], [generic_filter()]
-            )
-
-        sent = json.loads(httpx_mock.get_requests()[0].content)
-
-        assert sent["cellid_list"] == [{"crop": "bean", "cellids": [1, 2]}]
-        assert sent["data"][0]["indicator"] == ["64a000000000000000000001"]
-        assert sent["data"][0]["range"] == [0.0, 1000.0]
-        assert result.all_cellids() == [1]
-
-    async def test_filter_without_range_is_rejected_locally(self) -> None:
-        """A filter without range would crash the server; fail before sending."""
-        async with make_client() as client:
-            with pytest.raises(ValueError, match="needs a range"):
-                await client.filter_subset(
-                    [CropCellIds(crop="bean", cellids=[1])], [generic_filter(None)]
-                )
-
-    async def test_no_match_400_becomes_no_matching_data_error(self, httpx_mock: HTTPXMock) -> None:
-        """The API's plain-text 400 is surfaced as :class:`NoMatchingDataError`."""
-        httpx_mock.add_response(
-            url=f"{BASE}/api/v1/subset",
-            status_code=400,
-            text="Bad request! No data matching the selected filters!",
-        )
-
-        async with make_client() as client:
-            with pytest.raises(NoMatchingDataError) as info:
-                await client.filter_subset(
-                    [CropCellIds(crop="bean", cellids=[1])], [generic_filter()]
-                )
-
-        assert info.value.status_code == 400
-        assert "No data matching" in str(info.value.response_body)
+        assert all(not i.periods for c in categories for i in c.indicators)
 
 
-class TestClusterEndpoint:
+class TestCluster:
     """``/cluster`` posts the nested body and tolerates empty responses."""
 
     async def test_cluster_round_trip(self, httpx_mock: HTTPXMock, cluster_payload: dict) -> None:
-        """The response rows are grouped into clusters."""
+        """The response rows are grouped into clusters with statistics."""
         httpx_mock.add_response(url=f"{BASE}/api/v1/cluster", json=cluster_payload)
         request = ClusterRequest(
             cellid_list=[CropCellIds(crop="bean", cellids=[101, 102, 103])],
-            filters=[generic_filter(None)],
+            filters=[generic_filter()],
         )
 
-        async with make_client() as client:
+        async with make_client(token="secret") as client:
             result = await client.cluster(request)
 
         sent = json.loads(httpx_mock.get_requests()[0].content)
 
+        assert httpx_mock.get_requests()[0].headers["Authorization"] == "API-Token secret"
         assert sent["analysis"]["algorithm"] == ["agglomerative"]
+        assert "range" not in sent["data"][0]
         assert result.clusters(crop="bean") == {0: [101, 102], 1: [103]}
+        assert result.cluster_statistics()[1]["prec"]["mean"] == 85.0
 
     async def test_empty_response_yields_no_rows(self, httpx_mock: HTTPXMock) -> None:
         """The API returns ``{}`` when the analysis fails; no exception is raised."""
         httpx_mock.add_response(url=f"{BASE}/api/v1/cluster", json={})
         request = ClusterRequest(
-            cellid_list=[CropCellIds(crop="bean", cellids=[1])], filters=[generic_filter(None)]
+            cellid_list=[CropCellIds(crop="bean", cellids=[1])], filters=[generic_filter()]
         )
 
         async with make_client() as client:
@@ -201,42 +222,11 @@ class TestClusterEndpoint:
         assert result.rows == []
 
 
-class TestCoreCollectionEndpoint:
-    """``/core-collection`` maps its 422 to :class:`CoreCollectionError`."""
-
-    async def test_success(self, httpx_mock: HTTPXMock) -> None:
-        """The response exposes the selected cellids and the body uses ``cellIds``."""
-        httpx_mock.add_response(url=f"{BASE}/api/v1/core-collection", json={"cellids": [1, 3]})
-
-        async with make_client() as client:
-            result = await client.core_collection([1, 2, 3, 3], [generic_filter(None)], amount=2)
-
-        sent = json.loads(httpx_mock.get_requests()[0].content)
-
-        assert sent["cellIds"] == [1, 2, 3]
-        assert sent["amount"] == 2
-        assert result.cellids == [1, 3]
-
-    async def test_422_becomes_core_collection_error(self, httpx_mock: HTTPXMock) -> None:
-        """Too large an amount is reported as a business error, not a generic one."""
-        httpx_mock.add_response(
-            url=f"{BASE}/api/v1/core-collection",
-            status_code=422,
-            text="Core collection cannot be applied! ...",
-        )
-
-        async with make_client() as client:
-            with pytest.raises(CoreCollectionError) as info:
-                await client.core_collection([1], [generic_filter(None)], amount=50)
-
-        assert info.value.status_code == 422
-
-
 class TestTransportErrors:
     """Network failures and unexpected statuses become SDK exceptions."""
 
     async def test_unexpected_status_is_generic_api_error(self, httpx_mock: HTTPXMock) -> None:
-        """A 500 on any endpoint raises :class:`SubsettingApiError`."""
+        """A 500 raises :class:`SubsettingApiError`."""
         httpx_mock.add_response(url=f"{BASE}/api/v1/indicators", status_code=500, text="boom")
 
         async with make_client() as client:
@@ -265,30 +255,17 @@ class TestTransportErrors:
 
         assert len(httpx_mock.get_requests()) == 2
 
-    async def test_gateway_error_is_retried_then_succeeds(
-        self, httpx_mock: HTTPXMock, periods_payload: list[dict]
-    ) -> None:
+    async def test_gateway_error_is_retried_then_succeeds(self, httpx_mock: HTTPXMock) -> None:
         """A 503 followed by a 200 yields the successful result."""
-        httpx_mock.add_response(url=f"{BASE}/api/v1/indicator-period", status_code=503)
-        httpx_mock.add_response(url=f"{BASE}/api/v1/indicator-period", json=periods_payload)
+        httpx_mock.add_response(url=f"{BASE}/api/v1/indicators", status_code=503)
+        httpx_mock.add_response(url=f"{BASE}/api/v1/indicators", json=[])
+        httpx_mock.add_response(url=f"{BASE}/api/v1/indicator-period", json=[])
 
         async with make_client(max_retries=1) as client:
-            periods = await client.get_indicator_periods()
+            categories = await client.get_indicators()
 
-        assert len(periods) == len(periods_payload)
-        assert len(httpx_mock.get_requests()) == 2
-
-    async def test_business_4xx_is_not_retried(self, httpx_mock: HTTPXMock) -> None:
-        """A 400 from ``/subset`` is final: only one request is sent."""
-        httpx_mock.add_response(url=f"{BASE}/api/v1/subset", status_code=400, text="no data")
-
-        async with make_client(max_retries=3) as client:
-            with pytest.raises(NoMatchingDataError):
-                await client.filter_subset(
-                    [CropCellIds(crop="bean", cellids=[1])], [generic_filter()]
-                )
-
-        assert len(httpx_mock.get_requests()) == 1
+        assert categories == []
+        assert len(httpx_mock.get_requests()) == 3
 
 
 class TestInjectedHttpClient:

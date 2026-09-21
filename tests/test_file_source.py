@@ -241,7 +241,7 @@ class TestRegistryModes:
 
         assert FILE_ONLY_TOOLS <= names
         assert not (GENESYS_ONLY_TOOLS & names)
-        assert {"search_documents", "filter_selection_by_climate", "describe_selection"} <= names
+        assert {"search_documents", "cluster_selection_by_climate", "describe_selection"} <= names
 
     def test_unknown_mode(self) -> None:
         """An unknown source is a programming error."""
@@ -333,30 +333,44 @@ class TestFileTools:
 
         assert "No accession spreadsheet" in result["error"]
 
-    async def test_climate_filter_on_file_selection(
+    async def test_climate_cluster_on_file_selection(
         self, file_services: ToolServices, httpx_mock: HTTPXMock
     ) -> None:
         """Climate tools work on file-loaded cells exactly as on Genesys ones."""
         registry = build_registry("file")
         await registry.execute(file_services, "load_accessions_from_file", {})
-        surviving = DEFAULT_GRID.cellid(-12.0, -77.0)
+        cell_a = DEFAULT_GRID.cellid(4.5, -74.1)
+        cell_b = DEFAULT_GRID.cellid(-12.0, -77.0)
         mock_catalog(httpx_mock)
         httpx_mock.add_response(
-            url=f"{SUBSETTING}/api/v1/subset",
+            url=f"{SUBSETTING}/api/v1/cluster",
             json={
-                "filtered_cellids": [{"crop": "unknown", "cellid": [surviving]}],
-                "quantile": [],
-                "proportion": [],
+                "data": [
+                    {
+                        "cellid": cell_a,
+                        "prec_month1": 200.0,
+                        "cluster_hac": 0,
+                        "crop_name": "unknown",
+                    },
+                    {
+                        "cellid": cell_b,
+                        "prec_month1": 5.0,
+                        "cluster_hac": 1,
+                        "crop_name": "unknown",
+                    },
+                ]
             },
         )
 
-        result = await registry.execute(
-            file_services,
-            "filter_selection_by_climate",
-            {"indicator": "total precipitation", "min_value": 0, "max_value": 100},
+        clustered = await registry.execute(
+            file_services, "cluster_selection_by_climate", {"indicators": ["total precipitation"]}
         )
+        picked = await registry.execute(file_services, "pick_cluster", {"cluster": "1"})
+        sent = json.loads(httpx_mock.get_requests()[-1].content)
 
-        assert result["kept"] == 1
+        assert sent["cellid_list"] == [{"crop": "unknown", "cellids": [cell_a, cell_b]}]
+        assert [c["accessions"] for c in clustered["clusters"]] == [2, 1]
+        assert picked["kept"] == 1
         assert file_services.context.uuids() == ["G003"]
         assert file_services.context.stage is Stage.CLIMATE
 

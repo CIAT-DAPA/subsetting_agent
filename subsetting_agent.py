@@ -300,9 +300,14 @@ class SubsettingAgent:
         stalled_iterations = 0
         tools = registry.openai_tools()
 
+        print(f"Tools: {tools}")
+        print(f"Memory: {self.memory}")
         # Each iteration is one LLM call followed by the tool calls it requested.
         for iteration in range(1, self.max_iterations + 1):
             logger.debug("Agent iteration %s", iteration)
+            print("Agent iteration %s", iteration)
+            print("Agent iteration %s", iteration)
+            
 
             response = await acompletion(
                 model=self.model,

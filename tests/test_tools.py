@@ -185,7 +185,7 @@ class TestRegistry:
         """Every tool renders as an OpenAI function definition."""
         tools = registry.openai_tools()
 
-        assert len(tools) == 14
+        assert len(tools) == 13
         assert all(t["type"] == "function" for t in tools)
         assert all(t["function"]["parameters"]["type"] == "object" for t in tools)
         assert "select_accessions" in registry.describe()
@@ -477,58 +477,6 @@ class TestClimateTools:
 
         assert result["indicators"][0]["name"] == "Total precipitation"
 
-    async def test_filter_by_climate(
-        self, registry: ToolRegistry, services: ToolServices, httpx_mock: HTTPXMock
-    ) -> None:
-        """Only accessions in the surviving cells are kept."""
-        services.context = seeded_context({"u-1": 10, "u-2": 20, "u-3": 20})
-        mock_catalog(httpx_mock)
-        httpx_mock.add_response(
-            url=f"{SUBSETTING}/api/v1/subset",
-            json={
-                "filtered_cellids": [{"crop": "bean", "cellid": [20]}],
-                "quantile": [],
-                "proportion": [],
-            },
-        )
-
-        result = await registry.execute(
-            services,
-            "filter_selection_by_climate",
-            {
-                "indicator": "total precipitation",
-                "min_value": 100,
-                "max_value": 500,
-                "month_start": 5,
-                "month_end": 9,
-            },
-        )
-        sent = json.loads(httpx_mock.get_requests()[-1].content)
-
-        assert sent["cellid_list"] == [{"crop": "bean", "cellids": [10, 20]}]
-        assert sent["data"][0]["months"] == [5, 9]
-        assert sent["data"][0]["range"] == [100.0, 500.0]
-        assert result["kept"] == 2
-        assert services.context.uuids() == ["u-2", "u-3"]
-        assert services.context.stage is Stage.CLIMATE
-
-    async def test_filter_by_climate_no_match_keeps_selection(
-        self, registry: ToolRegistry, services: ToolServices, httpx_mock: HTTPXMock
-    ) -> None:
-        """A 400 'no data' from the API does not empty the selection."""
-        services.context = seeded_context({"u-1": 10})
-        mock_catalog(httpx_mock)
-        httpx_mock.add_response(url=f"{SUBSETTING}/api/v1/subset", status_code=400, text="no data")
-
-        result = await registry.execute(
-            services,
-            "filter_selection_by_climate",
-            {"indicator": "prec", "min_value": 0, "max_value": 1},
-        )
-
-        assert result["kept"] == 0
-        assert services.context.count == 1
-
     async def test_cluster_and_pick(
         self, registry: ToolRegistry, services: ToolServices, httpx_mock: HTTPXMock
     ) -> None:
@@ -555,6 +503,7 @@ class TestClimateTools:
 
         assert sent["analysis"]["hyperparameter"]["n_clusters"] == 2
         assert [c["accessions"] for c in clustered["clusters"]] == [2, 1]
+        assert clustered["clusters"][1]["indicators"]["prec"]["mean"] == 9.0
         assert picked["kept"] == 1
         assert services.context.uuids() == ["u-3"]
         assert services.context.selected_cluster == "1"
@@ -581,9 +530,7 @@ class TestClimateTools:
         mock_catalog(httpx_mock)
 
         result = await registry.execute(
-            services,
-            "filter_selection_by_climate",
-            {"indicator": "wind", "min_value": 0, "max_value": 1},
+            services, "cluster_selection_by_climate", {"indicators": ["wind"]}
         )
 
         assert "No indicator matches" in result["error"]

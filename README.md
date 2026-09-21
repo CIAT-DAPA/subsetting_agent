@@ -39,7 +39,7 @@ subsetting_agent/
 │   ├── models.py               #   AccessionFilter builder, Accession, pages, descriptors
 │   └── exceptions.py
 ├── subsetting_sdk/             # Subsetting API (climate indicators, clustering)
-│   ├── client.py               #   SubsettingClient (8 endpoints, typed)
+│   ├── client.py               #   SubsettingClient: get_indicators(), cluster() (API token auth)
 │   ├── models.py               #   IndicatorFilter, ClusterRequest/Result, ...
 │   ├── catalog.py              #   IndicatorCatalog: names -> indicator period ids
 │   ├── grid.py                 #   GridSpec: lat/lon -> cellid (raster_base grid)
@@ -146,6 +146,8 @@ Example requests:
 - "Keep only the ones with drought tolerance score above 3."
 - "Group them by total precipitation and maximum temperature between May and
   September, and keep the driest cluster."
+- "Keep only the accessions from sites with less than 500 mm of rain a year."
+  (the agent clusters by precipitation and keeps the clusters under the threshold)
 - (attach a paper) "Which of the selected accessions does this paper report as
   heat tolerant?"
 - (attach `my_accessions.xlsx`) "Cluster my accessions by drought indicators and
@@ -169,6 +171,8 @@ app). Defaults are shown in `.env.example`.
 | `SUBSETTING_API_URL` | `https://sandbox.genesys-pgr.org/api/subsetting` | Root URL of the Subsetting API |
 | `SUBSETTING_API_PREFIX` | `/api/v1` | Route prefix; set empty if the proxy strips it |
 | `SUBSETTING_API_TIMEOUT` | `120` | Per-request timeout (clustering can be slow) |
+| `SUBSETTING_API_TOKEN` | *(empty)* | API token for the deployed Subsetting API (request it at the API URL); required in production |
+| `SUBSETTING_API_AUTH_SCHEME` | `API-Token` | Scheme placed before the token in the `Authorization` header |
 | `DOCUMENT_CACHE_DIR` | `<system temp>/subsetting_agent_documents` | Where PDF conversions are cached |
 | `SUBSETTING_AGENT_MODEL` | `ollama_chat/llama3.1:8b` | litellm model name |
 | `SUBSETTING_AGENT_API_BASE` | `http://localhost:11434` | LLM endpoint |
@@ -217,35 +221,25 @@ switching to another field is an environment change only.
 
 ### Subsetting: climate indicators and clustering
 
+The SDK deliberately exposes only the two operations the agent needs.
+
 ```python
 import asyncio
 from subsetting_sdk import (
-    ClusteringAlgorithm,
-    ClusterRequest,
-    CropCellIds,
-    IndicatorCatalog,
-    SubsettingClient,
+    ClusteringAlgorithm, ClusterRequest, CropCellIds, IndicatorCatalog, SubsettingClient,
 )
 
-
 async def main() -> None:
-    async with SubsettingClient() as subsetting:
-        catalog = await IndicatorCatalog.from_client(subsetting)
-        print(catalog.category_names())  # e.g. Drought stress, Heat stress, ...
+    async with SubsettingClient() as subsetting:          # token from SUBSETTING_API_TOKEN
+        catalog = await IndicatorCatalog.from_client(subsetting)   # one call: get_indicators()
+        print(catalog.category_names())   # e.g. Drought stress, Heat stress, ...
 
-        # Resolve human names into validated filters with the right period ids.
-        precipitation = catalog.build_filter(
-            "total precipitation", months=(5, 9), value_range=(200, 800)
-        )
+        # Resolve human names into validated filters with the right dataset ids.
+        precipitation = catalog.build_filter("total precipitation", months=(5, 9))
         tmax = catalog.build_filter("maximum temperature", months=(5, 9))
 
         cells = [CropCellIds(crop="bean", cellids=[101, 102, 103, 201])]
 
-        # Univariate filter: keep cells inside every range.
-        subset = await subsetting.filter_subset(cells, [precipitation])
-        print(subset.all_cellids())
-
-        # Multivariate clustering of the remaining cells.
         result = await subsetting.cluster(
             ClusterRequest(
                 cellid_list=cells,
@@ -253,15 +247,16 @@ async def main() -> None:
                 algorithms=[ClusteringAlgorithm.AGGLOMERATIVE],
             )
         )
-        print(result.clusters(crop="bean"))  # {0: [101, 102], 1: [103], ...}
-
+        print(result.clusters(crop="bean"))          # {0: [101, 102], 1: [103], ...}
+        print(result.cluster_statistics())           # {0: {"prec": {"mean": ..., "min": ..., "max": ...}}}
 
 asyncio.run(main())
 ```
 
-Business errors are typed: `NoMatchingDataError` (no cell satisfies the
-filters) and `CoreCollectionError` (requested core collection larger than the
-available cells). Network and gateway errors are retried; 4xx never are.
+`get_indicators()` combines `GET /indicators` and `GET /indicator-period` so every
+indicator comes with its datasets (period × SSP scenario). Authentication
+failures (401/403) raise `SubsettingAuthError` with a hint about
+`SUBSETTING_API_TOKEN`; network and gateway errors are retried, 4xx never are.
 
 ### Documents: PDF to Markdown and search
 
@@ -286,7 +281,7 @@ to ~1500 characters so that a small local model can consume search hits.
 
 ### Tools exposed to the LLM
 
-The registry (`tools.build_registry(source)`) defines 16 tools, grouped by stage;
+The registry (`tools.build_registry(source)`) defines 15 tools, grouped by stage;
 `source` is `"genesys"` or `"file"` and selects which stage-1 tools are exposed.
 Every tool receives a `ToolServices` object (clients, document store and the
 session `AccessionContext`) and returns a compact JSON-serializable result;
@@ -303,8 +298,7 @@ failures become `{"error": ...}` so the model can recover.
 | Documents | `list_documents`, `search_documents`, `read_document_section` | Explore uploaded PDFs |
 | Documents | `keep_accessions_from_documents` | Reduce to accession numbers a paper identifies |
 | Climate | `list_climate_indicators` | Indicators by stress category |
-| Climate | `filter_selection_by_climate` | Keep sites with an indicator inside a range |
-| Climate | `cluster_selection_by_climate` | Cluster sites; then `pick_cluster` |
+| Climate | `cluster_selection_by_climate` | Cluster sites and report per-cluster indicator statistics; then `pick_cluster` |
 | Any | `describe_selection` | Stage, counts, applied steps and examples |
 
 ```python
@@ -397,12 +391,12 @@ Conventions used across the code base:
   `/acn/{uuid}/observations`, not as a list filter. The trait stage therefore
   runs over a bounded selection (`GENESYS_MAX_ACCESSIONS`); the agent may need
   to ask the user to narrow the passport filter first.
-- **Subsetting API quirks handled by the SDK.** Two GET endpoints return JSON
-  with a `text/html` content type; `/subset` reports "no match" as HTTP 400;
-  `/core-collection` reports "too few cells" as HTTP 422; `/cluster` answers
-  `{}` when the analysis fails internally. Month windows may wrap the year
-  (e.g. November to February). "Total precipitation" is summed over the window,
-  every other monthly indicator is averaged.
+- **Subsetting API quirks handled by the SDK.** The two GET endpoints return
+  JSON with a `text/html` content type; `/cluster` answers `{}` when the
+  analysis fails internally. Month windows may wrap the year (e.g. November to
+  February). Thresholds ("less than 500 mm") are resolved by clustering and
+  comparing the per-cluster statistics, since the agent uses no per-site filter
+  endpoint.
 - **Indicator ids are MongoDB ObjectIds** of *indicator periods*
   (indicator × period × SSP scenario). `IndicatorCatalog.build_filter` hides
   this from the agent and from the LLM.

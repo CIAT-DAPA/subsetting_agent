@@ -1,8 +1,13 @@
 """Asynchronous HTTP client for the Genesys Subsetting API.
 
-The client wraps the eight Flask endpoints of the API with typed methods. It is
-independent from the agent and the LLM so it can be used from scripts, notebooks
-or tests.
+The client exposes the two operations the agent needs: listing the available
+climate/soil indicators (with their datasets) and clustering a set of grid
+cells by indicator values. It is independent from the agent and the LLM so it
+can be used from scripts, notebooks or tests.
+
+Authentication: when ``SUBSETTING_API_TOKEN`` is set, every request carries
+``Authorization: <scheme> <token>`` (scheme ``API-Token`` by default, as in the
+Genesys API; configurable with ``SUBSETTING_API_AUTH_SCHEME``).
 
 Example:
     async with SubsettingClient() as client:
@@ -20,24 +25,15 @@ from typing import Any
 import httpx
 
 from subsetting_sdk.exceptions import (
-    CoreCollectionError,
-    NoMatchingDataError,
     SubsettingApiError,
+    SubsettingAuthError,
     SubsettingConnectionError,
 )
 from subsetting_sdk.models import (
-    AnaloguesResult,
     ClusterRequest,
     ClusterResult,
-    CoreCollectionResult,
-    CropCellIds,
     IndicatorCategory,
-    IndicatorDataResult,
-    IndicatorFilter,
     IndicatorPeriod,
-    IndicatorRangesResult,
-    MonthWindow,
-    SubsetResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://sandbox.genesys-pgr.org/api/subsetting"
 DEFAULT_API_PREFIX = "/api/v1"
 DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_AUTH_SCHEME = "API-Token"
 
 # HTTP statuses that are worth retrying: the request never reached a healthy
 # backend, so repeating it cannot duplicate any side effect (the API is read-only).
@@ -57,9 +54,11 @@ class SubsettingClient:
     Attributes:
         base_url: Root URL of the deployment (without the ``/api/v1`` prefix).
         api_prefix: Path prefix of the Flask routes; empty if the proxy strips it.
+        token: API token sent in the ``Authorization`` header, if configured.
+        auth_scheme: Scheme word placed before the token in the header.
         timeout: Per-request timeout in seconds.
         max_retries: Number of additional attempts for network errors and 5xx
-            gateway errors. Business errors (4xx) are never retried.
+            gateway errors. Business and auth errors (4xx) are never retried.
     """
 
     def __init__(
@@ -67,6 +66,8 @@ class SubsettingClient:
         base_url: str | None = None,
         *,
         api_prefix: str | None = None,
+        token: str | None = None,
+        auth_scheme: str | None = None,
         timeout: float | None = None,
         max_retries: int = 2,
         backoff_seconds: float = 1.0,
@@ -80,6 +81,9 @@ class SubsettingClient:
         Args:
             base_url: Root URL of the API (``SUBSETTING_API_URL``).
             api_prefix: Route prefix (``SUBSETTING_API_PREFIX``).
+            token: API token (``SUBSETTING_API_TOKEN``). Requests are sent
+                without the header when no token is configured.
+            auth_scheme: Authorization scheme (``SUBSETTING_API_AUTH_SCHEME``).
             timeout: Per-request timeout in seconds (``SUBSETTING_API_TIMEOUT``).
             max_retries: Additional attempts for retryable failures.
             backoff_seconds: Base delay between retries; doubles on each attempt.
@@ -94,6 +98,10 @@ class SubsettingClient:
             api_prefix = os.getenv("SUBSETTING_API_PREFIX", DEFAULT_API_PREFIX)
 
         self.api_prefix = "/" + api_prefix.strip("/") if api_prefix.strip("/") else ""
+        self.token = token if token is not None else os.getenv("SUBSETTING_API_TOKEN", "")
+        self.auth_scheme = (
+            auth_scheme or os.getenv("SUBSETTING_API_AUTH_SCHEME", DEFAULT_AUTH_SCHEME)
+        ).strip()
         self.timeout = float(
             timeout
             if timeout is not None
@@ -128,76 +136,41 @@ class SubsettingClient:
         if not self._external_client:
             await self._http.aclose()
 
+    @property
+    def has_token(self) -> bool:
+        """Whether an API token is configured."""
+        return bool(self.token.strip())
+
     # ------------------------------------------------------------------ #
     # Endpoints
     # ------------------------------------------------------------------ #
 
     async def get_indicators(self) -> list[IndicatorCategory]:
-        """List every indicator grouped by stress category (``GET /indicators``)."""
-        payload = await self._request("GET", "/indicators")
+        """List every indicator grouped by stress category, with its datasets.
 
-        return [IndicatorCategory.model_validate(item) for item in payload]
-
-    async def get_indicator_periods(self) -> list[IndicatorPeriod]:
-        """List every indicator period, i.e. dataset per indicator, period and SSP."""
-        payload = await self._request("GET", "/indicator-period")
-
-        return [IndicatorPeriod.model_validate(item) for item in payload]
-
-    async def get_indicator_ranges(
-        self,
-        cellid_list: list[CropCellIds],
-        indicator_periods: list[str],
-        months: MonthWindow | None = None,
-    ) -> IndicatorRangesResult:
-        """Get the observed min/max of indicators over the selected cells.
-
-        Useful to propose sensible range bounds before calling ``filter_subset``.
-
-        Args:
-            cellid_list: Selected cellids grouped by crop.
-            indicator_periods: Ids of the indicator periods to summarize.
-            months: Month window for monthly indicators; defaults to the full year.
+        Combines ``GET /indicators`` (catalog grouped by category) with
+        ``GET /indicator-period`` (datasets per indicator, period and SSP
+        scenario) so callers get everything needed to build a cluster request
+        from one call.
         """
-        body = {
-            "months": (months or MonthWindow(start=1, end=12)).to_api(),
-            "ind_periods": indicator_periods,
-            "cellid_list": [item.to_api() for item in cellid_list],
-        }
-        payload = await self._request("POST", "/indicators-range", json=body)
+        categories_payload = await self._request("GET", "/indicators")
+        periods_payload = await self._request("GET", "/indicator-period")
 
-        return IndicatorRangesResult.model_validate(payload)
+        categories = [IndicatorCategory.model_validate(item) for item in categories_payload]
+        periods_by_indicator: dict[str, list[IndicatorPeriod]] = {}
 
-    async def filter_subset(
-        self,
-        cellid_list: list[CropCellIds],
-        filters: list[IndicatorFilter],
-    ) -> SubsetResult:
-        """Keep the cells whose aggregated indicator values fall inside every range.
+        # Index the datasets by indicator id to attach them in one pass.
+        for item in periods_payload:
+            period = IndicatorPeriod.model_validate(item)
+            periods_by_indicator.setdefault(period.indicator, []).append(period)
 
-        Args:
-            cellid_list: Selected cellids grouped by crop.
-            filters: One filter per indicator; each must define ``range``.
+        # Attach the datasets to their indicator; indicators without datasets
+        # keep an empty list and cannot be used in a cluster request.
+        for category in categories:
+            for indicator in category.indicators:
+                indicator.periods = periods_by_indicator.get(indicator.id, [])
 
-        Raises:
-            ValueError: If a filter has no range, since the API requires it here.
-            NoMatchingDataError: If no cell satisfies all the filters.
-        """
-        # The API indexes ``range[0]`` and ``range[1]`` unconditionally, so a
-        # filter without range would crash the server instead of failing cleanly.
-        for indicator_filter in filters:
-            if indicator_filter.range is None:
-                raise ValueError(
-                    f"Filter for '{indicator_filter.name}' needs a range to be used with /subset."
-                )
-
-        body = {
-            "cellid_list": [item.to_api() for item in cellid_list],
-            "data": [item.to_api() for item in filters],
-        }
-        payload = await self._request("POST", "/subset", json=body)
-
-        return SubsetResult.model_validate(payload)
+        return categories
 
     async def cluster(self, request: ClusterRequest) -> ClusterResult:
         """Run the multivariate clustering over the selected cells (``POST /cluster``).
@@ -218,82 +191,22 @@ class SubsettingClient:
 
         return ClusterResult.from_api(payload or {})
 
-    async def core_collection(
-        self,
-        cellids: list[int],
-        filters: list[IndicatorFilter],
-        amount: int,
-        months: MonthWindow | None = None,
-    ) -> CoreCollectionResult:
-        """Select a representative core collection of ``amount`` cells.
-
-        Args:
-            cellids: Cells to sample from (usually one cluster).
-            filters: Indicators that define the environmental space.
-            amount: Number of cells to keep.
-            months: Month window for monthly indicators; defaults to the full year.
-
-        Raises:
-            CoreCollectionError: If ``amount`` exceeds the cells with complete data.
-        """
-        body = {
-            "indicators": [item.to_api() for item in filters],
-            "amount": amount,
-            "cellIds": list(dict.fromkeys(cellids)),
-            "months": (months or MonthWindow(start=1, end=12)).to_api(),
-        }
-        payload = await self._request("POST", "/core-collection", json=body)
-
-        return CoreCollectionResult.model_validate(payload)
-
-    async def analogues(
-        self,
-        reference_cellid: int,
-        reference_indicator_periods: list[str],
-        cellids: list[int],
-        indicator_periods: list[str],
-    ) -> AnaloguesResult:
-        """Rank cells by climatic similarity to a reference cell.
-
-        Args:
-            reference_cellid: Cell whose climate is the target.
-            reference_indicator_periods: Indicator periods describing the reference.
-            cellids: Candidate cells to compare.
-            indicator_periods: Indicator periods describing the candidates.
-        """
-        body = {
-            "cellid_ref": reference_cellid,
-            "indicator_cellid_ref": reference_indicator_periods,
-            "indicator_cellids": indicator_periods,
-            "cellids": list(dict.fromkeys(cellids)),
-        }
-        payload = await self._request("POST", "/analogues-multivariate", json=body)
-
-        return AnaloguesResult.model_validate(payload)
-
-    async def get_indicators_data(
-        self,
-        cellids: list[int],
-        indicator_periods: list[str],
-    ) -> IndicatorDataResult:
-        """Fetch the raw indicator values of the given cells (``POST /indicators-data``).
-
-        Args:
-            cellids: Cells to read.
-            indicator_periods: Indicator periods to read.
-        """
-        body = {"cellid": list(dict.fromkeys(cellids)), "indicators": indicator_periods}
-        payload = await self._request("POST", "/indicators-data", json=body)
-
-        return IndicatorDataResult.model_validate(payload)
-
     # ------------------------------------------------------------------ #
     # Transport
     # ------------------------------------------------------------------ #
 
     def _url(self, path: str) -> str:
-        """Build the absolute URL of an endpoint path such as ``/subset``."""
+        """Build the absolute URL of an endpoint path such as ``/cluster``."""
         return f"{self.base_url}{self.api_prefix}{path}"
+
+    def _headers(self) -> dict[str, str]:
+        """Build the request headers, adding the token only when configured."""
+        headers = {"Accept": "application/json"}
+
+        if self.has_token:
+            headers["Authorization"] = f"{self.auth_scheme} {self.token.strip()}"
+
+        return headers
 
     async def _request(self, method: str, path: str, *, json: Any = None) -> Any:
         """Send a request with retries and translate failures into SDK errors.
@@ -314,7 +227,7 @@ class SubsettingClient:
         # gateway statuses, up to ``max_retries`` additional times.
         while True:
             try:
-                response = await self._http.request(method, url, json=json)
+                response = await self._http.request(method, url, json=json, headers=self._headers())
 
             except httpx.HTTPError as exc:
                 # Network-level failure: retry if attempts remain, else surface it.
@@ -350,17 +263,16 @@ class SubsettingClient:
         )
         await asyncio.sleep(delay)
 
-    @staticmethod
-    def _handle_response(response: httpx.Response, path: str) -> Any:
+    def _handle_response(self, response: httpx.Response, path: str) -> Any:
         """Map an HTTP response to decoded JSON or to the matching SDK exception.
 
         Args:
             response: Response received from the API.
-            path: Endpoint path, used to pick the business exception.
+            path: Endpoint path, used in error messages.
         """
         body_text = response.text
 
-        # Successful responses are decoded manually because two endpoints
+        # Successful responses are decoded manually because the GET endpoints
         # return ``json.dumps`` output without a JSON content type.
         if response.is_success:
             try:
@@ -373,19 +285,16 @@ class SubsettingClient:
                     response_body=body_text,
                 ) from exc
 
-        # A 400 from /subset is the API's way of saying "no cell matched".
-        if response.status_code == 400 and path == "/subset":
-            raise NoMatchingDataError(
-                "No accession location matches the selected climate filters.",
-                status_code=400,
-                response_body=body_text,
+        # Authentication problems get a hint about the token configuration.
+        if response.status_code in (401, 403):
+            hint = (
+                " No API token configured (SUBSETTING_API_TOKEN)."
+                if not self.has_token
+                else " Check SUBSETTING_API_TOKEN and SUBSETTING_API_AUTH_SCHEME."
             )
-
-        # A 422 from /core-collection means the requested amount is too large.
-        if response.status_code == 422 and path == "/core-collection":
-            raise CoreCollectionError(
-                body_text.strip() or "Core collection cannot be computed for this selection.",
-                status_code=422,
+            raise SubsettingAuthError(
+                f"Subsetting API refused the request to {path}: {body_text.strip()[:100]}.{hint}",
+                status_code=response.status_code,
                 response_body=body_text,
             )
 
