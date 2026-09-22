@@ -341,7 +341,8 @@ def build_full_registry() -> ToolRegistry:
             name="list_climate_indicators",
             description=(
                 "List available climate and soil indicators, optionally by stress category "
-                "(drought, flood, heat, photoperiod, soil, crop specific)."
+                "(drought, flood, heat, photoperiod, soil, crop specific). Use only when the "
+                "user explicitly asks about climate or environmental conditions."
             ),
             parameters=_schema(
                 {
@@ -362,7 +363,8 @@ def build_full_registry() -> ToolRegistry:
             description=(
                 "Group the selected accessions into climate clusters using one or more "
                 "indicators, and report each cluster's indicator statistics. Requires an "
-                "existing selection. Follow with pick_cluster to keep one cluster."
+                "existing selection. Follow with pick_cluster to keep one cluster. Use only "
+                "when the user explicitly asks about climate or environmental conditions."
             ),
             parameters=_schema(
                 {

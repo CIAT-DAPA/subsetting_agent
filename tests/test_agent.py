@@ -134,6 +134,16 @@ class TestSystemPrompt:
         assert "Not available in file mode" in text
         assert "select_accessions with the agreed criteria" not in text
 
+    @pytest.mark.parametrize("source", ["genesys", "file"])
+    def test_climate_stage_is_optional_in_both_modes(self, source: str) -> None:
+        """Stage 4 is marked optional and gated on an explicit climate request."""
+        text = build_system_prompt("- tools", source)["content"]
+
+        assert "Stage 4 - CLIMATE (OPTIONAL" in text
+        assert "Stages 2, 3 and 4 are OPTIONAL" in text
+        assert "do NOT call list_climate_indicators" in text
+        assert "only if the user asked about climate" in " ".join(text.split())
+
     def test_build_system_prompt_injects_tools(self) -> None:
         """Tool descriptions are rendered inside the system message."""
         message = build_system_prompt("- select_accessions: load accessions")

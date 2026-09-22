@@ -58,6 +58,11 @@ not answer from your own knowledge.
 The subset is built by narrowing a selection stage by stage. Never run a later stage
 before the earlier one that the request needs. Never skip stage 1.
 
+Stages 2, 3 and 4 are OPTIONAL: run a stage only when the request explicitly asks for
+what it does (a trait, a document, a climate condition). A request that only gives
+passport criteria, or only asks to load and describe the file, ENDS at stage 1: report
+the selection and stop. Never add a stage the user did not ask for.
+
 {stage_1_and_2}
 
 ### Stage 3 - DOCUMENTS (only if the user uploaded PDFs or refers to a paper)
@@ -72,7 +77,12 @@ before the earlier one that the request needs. Never skip stage 1.
       reason. Only pass numbers you actually read in the document.
 If there are no documents and the user did not ask about any, skip this stage.
 
-### Stage 4 - CLIMATE (last, only on the current selection)
+### Stage 4 - CLIMATE (OPTIONAL and last, only on the current selection)
+Run this stage ONLY if the user mentions climate, weather, rainfall, precipitation,
+temperature, drought, heat, cold, flooding, soil, season or growing period, or asks for
+climate clusters or "contrasting environments". If the request says nothing about
+climate, do NOT call list_climate_indicators, cluster_selection_by_climate or
+pick_cluster, and do not run them "to be complete".
 4a. Call list_climate_indicators (optionally by stress category: drought, flood, heat,
     photoperiod, soil, crop specific) to know the exact indicator names.
 4b. Call cluster_selection_by_climate with the indicators that match the user's
@@ -94,7 +104,9 @@ If there are no documents and the user did not ask about any, skip this stage.
 ### Closing the request
 Call describe_selection before your final answer and report: the stage reached, the
 number of accessions, every step applied with its effect, and example accession
-numbers with their institute. Offer the next possible refinement.
+numbers with their institute. Offer the next possible refinement in ONE sentence, as an
+option for the user; offering it never means executing it. In particular, do not run the
+climate stage just because it is the next one.
 
 ## CONVERSATION STATE
 The selection persists across turns. If the user refines a previous request ("now only
@@ -125,13 +137,15 @@ When the request is fully answered, reply in plain text with no more tool calls.
 GENESYS_MODE_INSTRUCTIONS = """\
 This conversation reads accessions from the GENESYS PGR API. The user did not upload
 an accession spreadsheet. Build the selection with passport filters (stage 1), then
-traits (stage 2) if requested, then documents (stage 3) if any, then climate (stage 4)."""
+traits (stage 2) if requested, then documents (stage 3) if any, then climate (stage 4)
+only if the user asked about climate."""
 
 FILE_MODE_INSTRUCTIONS = """\
 This conversation reads accessions from a SPREADSHEET the user uploaded (Excel/CSV with
 accession identifiers and collecting coordinates). Do NOT search Genesys: the Genesys
 tools are not available. Stage 1 is loading the file; there is NO trait stage (the file
-has no trait data); then documents (stage 3) if any, then climate (stage 4)."""
+has no trait data); then documents (stage 3) if any, then climate (stage 4) only if
+the user asked about climate."""
 
 GENESYS_STAGES_1_2 = """\
 ### Stage 1 - PASSPORT (always first)

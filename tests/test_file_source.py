@@ -538,3 +538,42 @@ class TestAutomaticFileLoad:
 
         assert "load_accessions_from_file" in empty_selection_error(file_services)["error"]
         assert "select_accessions" in empty_selection_error(genesys_services)["error"]
+
+
+class TestClimateIsOptional:
+    """The Subsetting API is contacted only when a climate tool is called."""
+
+    async def test_file_turn_without_climate_request_makes_no_subsetting_call(
+        self, monkeypatch: pytest.MonkeyPatch, file_services: ToolServices, httpx_mock: HTTPXMock
+    ) -> None:
+        """Loading and describing the file never reaches the Subsetting host."""
+        fake = FakeLLM(
+            [
+                llm_response(tool_calls=[tool_call("describe_selection", {})]),
+                llm_response("Your file has 3 accessions from 2 sites."),
+            ]
+        )
+        monkeypatch.setattr(agent_module, "acompletion", fake)
+        agent = SubsettingAgent(services=file_services)
+
+        turn = await agent.chat(
+            "load my accessions", accession_file_paths=file_services.accession_files
+        )
+
+        # pytest-httpx fails on unexpected requests; none must have been attempted.
+        assert httpx_mock.get_requests() == []
+        assert turn.answer == "Your file has 3 accessions from 2 sites."
+        assert AccessionContext.from_json(turn.context_json).count == 3
+        climate_tools = {"list_climate_indicators", "cluster_selection_by_climate", "pick_cluster"}
+        called = {m.get("name") for m in turn.memory if m["role"] == "tool"}
+        assert not called & climate_tools
+
+    def test_climate_tool_descriptions_state_the_gate(self) -> None:
+        """Both climate tools tell the model to wait for an explicit climate request."""
+        registry = build_registry("file")
+        descriptions = {
+            t["function"]["name"]: t["function"]["description"] for t in registry.openai_tools()
+        }
+
+        for name in ("list_climate_indicators", "cluster_selection_by_climate"):
+            assert "explicitly asks about climate" in descriptions[name]
