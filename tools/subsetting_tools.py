@@ -13,10 +13,11 @@ from subsetting_sdk.models import (
     ClusteringAlgorithm,
     ClusteringHyperparameters,
     ClusterRequest,
+    ClusterRow,
     IndicatorFilter,
     MonthWindow,
 )
-from tools.accession_context import Stage
+from tools.accession_context import AccessionContext, Stage
 from tools.services import ToolServices, empty_selection_error
 
 
@@ -167,6 +168,7 @@ async def cluster_selection_by_climate(
     clusters = result.clusters(chosen, include_noise=False)
     statistics = result.cluster_statistics(chosen)
     context.set_clusters(clusters, chosen.value)
+    _record_climate_evidence(context, result.rows, chosen, window)
 
     cluster_report = []
 
@@ -195,6 +197,57 @@ async def cluster_selection_by_climate(
             "window). Use pick_cluster with a cluster label to keep only its accessions."
         ),
     }
+
+
+def _record_climate_evidence(
+    context: AccessionContext,
+    rows: list[ClusterRow],
+    algorithm: ClusteringAlgorithm,
+    window: MonthWindow,
+) -> None:
+    """Store the cluster label and the indicator means of each accession's site.
+
+    Every API row describes one grid cell: its cluster labels and the monthly
+    (or single) values of the indicators. The values sharing an indicator prefix
+    are averaged over the month window and attached, with the cluster label, to
+    every selected accession located in that cell.
+
+    Args:
+        context: Accession selection to annotate.
+        rows: Rows returned by the clustering endpoint.
+        algorithm: Algorithm whose label column is recorded.
+        window: Month window used, shown in the evidence label.
+    """
+    label_column = algorithm.result_column
+    months = f"months {window.start}-{window.end}"
+
+    # One row per cell: annotate all accessions that share the cell.
+    for row in rows:
+        members = context.accessions_in_cells([row.cellid])
+
+        if not members:
+            continue
+
+        pooled: dict[str, list[float]] = {}
+
+        # Pool the value columns by indicator prefix ("<pref>_month3" -> "<pref>").
+        for key, value in row.values.items():
+            if value is None:
+                continue
+
+            prefix = key.rsplit("_", 1)[0] if "_" in key else key
+            pooled.setdefault(prefix, []).append(float(value))
+
+        evidence: dict[str, Any] = {}
+        label = row.labels.get(label_column)
+
+        if label is not None:
+            evidence["climate cluster"] = str(label)
+
+        for prefix, values in pooled.items():
+            evidence[f"{prefix} (mean, {months})"] = round(sum(values) / len(values), 3)
+
+        context.add_evidence([member.uuid for member in members], **evidence)
 
 
 def _top_countries(members: list[Any], limit: int = 3) -> list[str]:
@@ -238,6 +291,9 @@ async def pick_cluster(services: ToolServices, *, cluster: int | str) -> dict[st
         description=f"Kept climate cluster {label} ({context.cluster_algorithm})",
     )
     context.selected_cluster = label
+
+    # Mark the kept cluster so the table shows the climate criterion applied.
+    context.add_evidence(None, **{"cluster kept": label})
 
     return {"cluster": label, "kept": len(members), "summary": context.summary()}
 

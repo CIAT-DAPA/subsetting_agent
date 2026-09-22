@@ -56,6 +56,10 @@ class AccessionRecord:
         longitude: Collecting-site longitude.
         cellid: Subsetting API grid cell of the collecting site.
         doi: Accession DOI, if any.
+        evidence: Values that show why the accession satisfies the user's
+            criteria, keyed by a human-readable label (trait value, climate
+            cluster, indicator means, citing document). Filled by the tools
+            as each stage runs and shown in the results table.
     """
 
     uuid: str
@@ -68,6 +72,7 @@ class AccessionRecord:
     longitude: float | None = None
     cellid: int | None = None
     doi: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_accession(
@@ -359,6 +364,42 @@ class AccessionContext:
 
         if STAGE_ORDER.index(Stage.CLIMATE) > STAGE_ORDER.index(self.stage):
             self.stage = Stage.CLIMATE
+
+    def add_evidence(self, uuids: list[str] | None, **values: Any) -> int:
+        """Attach evidence values to selected accessions.
+
+        Args:
+            uuids: Accessions to annotate; ``None`` means every selected accession.
+            **values: ``label=value`` pairs stored in each record's ``evidence``;
+                an existing label is overwritten with the newer value.
+
+        Returns:
+            Number of records annotated (unknown UUIDs are ignored).
+        """
+        targets = list(self.accessions) if uuids is None else uuids
+        annotated = 0
+
+        # Only records still in the selection receive evidence; dropped ones are gone.
+        for uuid in targets:
+            record = self.accessions.get(uuid)
+
+            if record is None:
+                continue
+
+            record.evidence.update(values)
+            annotated += 1
+
+        return annotated
+
+    def evidence_labels(self) -> list[str]:
+        """Return every evidence label present in the selection, in first-seen order."""
+        labels: dict[str, None] = {}
+
+        for record in self.accessions.values():
+            for label in record.evidence:
+                labels.setdefault(label, None)
+
+        return list(labels)
 
     def cluster_sizes(self) -> dict[str, int]:
         """Return the number of selected accessions per cluster label."""

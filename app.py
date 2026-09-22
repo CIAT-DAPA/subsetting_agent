@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from dotenv import load_dotenv
 
 # ``.env`` must be loaded before importing Gradio so that GRADIO_TEMP_DIR is honoured.
@@ -30,8 +31,10 @@ load_dotenv()
 import gradio as gr  # noqa: E402
 
 from config import Settings  # noqa: E402
+from reporting import build_selection_table, to_markdown, write_csv  # noqa: E402
 from storage.uploads import UploadError, UploadStore  # noqa: E402
 from subsetting_agent import SubsettingAgent  # noqa: E402
+from tools.accession_context import AccessionContext  # noqa: E402
 
 # The only place where the environment is turned into configuration. Every other
 # module receives what it needs from here.
@@ -40,6 +43,12 @@ SETTINGS = Settings.from_environment()
 # How many recent history messages are passed to the model. Bounds the context
 # window use (num_ctx) in long conversations.
 MAX_HISTORY_MESSAGES = SETTINGS.agent.max_history_messages
+
+# Rows of the results table shown in the chat preview message.
+MAX_PREVIEW_ROWS = 20
+
+# Heading that opens every preview message; used to keep previews out of the LLM memory.
+RESULTS_HEADING = "**Selected accessions ("
 
 logging.basicConfig(
     level=SETTINGS.server.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -152,6 +161,11 @@ def build_memory_from_history(history: list[dict[str, Any]]) -> list[dict[str, A
             continue
 
         text = extract_text(message.get("content")).strip()
+
+        # The results preview is UI output, not conversation: replaying a 20-row
+        # table to the model on every turn would only burn context.
+        if message.get("role") == "assistant" and text.startswith(RESULTS_HEADING):
+            continue
 
         if text:
             memory.append({"role": message["role"], "content": text})
@@ -294,12 +308,94 @@ def format_document_errors(errors: list[str]) -> str:
     return f"\n\n_Some attached files could not be processed:_\n{lines}"
 
 
+def build_results(
+    context_json: str, exports_dir: Path | None = None
+) -> tuple[pd.DataFrame | None, str | None, str]:
+    """Build the results table of a selection, its CSV file and its chat preview.
+
+    Runs after every turn, independently of the model: the table is derived
+    from the serialized selection so it always matches the state.
+
+    Args:
+        context_json: Serialized selection returned by the agent.
+        exports_dir: Where the CSV is written; the configured directory by default.
+
+    Returns:
+        ``(table, csv_path, markdown_preview)``; ``(None, None, "")`` when the
+        selection is empty, so the UI components are cleared.
+    """
+    # A corrupted state must not break the turn: it simply has no table.
+    try:
+        context = AccessionContext.from_json(context_json)
+
+    except (ValueError, TypeError, KeyError):
+        logger.warning("Selection state could not be parsed; no results table")
+        return None, None, ""
+
+    # No selection means nothing to show or export.
+    if context.is_empty:
+        return None, None, ""
+
+    frame = build_selection_table(context)
+    directory = exports_dir if exports_dir is not None else SETTINGS.storage.exports_dir
+
+    try:
+        csv_path: str | None = str(write_csv(frame, directory))
+
+    except OSError:  # the table is still shown even if the disk write fails
+        logger.exception("Could not write the selection CSV")
+        csv_path = None
+
+    preview = to_markdown(frame, max_rows=MAX_PREVIEW_ROWS)
+    preview = (
+        f"{RESULTS_HEADING}{len(frame)})** - preview of the first "
+        f"{min(len(frame), MAX_PREVIEW_ROWS)} rows; the complete table is in the CSV file "
+        f"below.\n\n{preview}"
+    )
+
+    return frame, csv_path, preview
+
+
+def build_reply(answer: str, preview: str, csv_path: str | None) -> list[Any]:
+    """Assemble the assistant messages shown for one turn.
+
+    Gradio renders each element of the list as its own assistant message, in
+    order: the agent's answer, the results preview and the downloadable CSV.
+
+    Args:
+        answer: Text produced by the agent (with any attachment warnings).
+        preview: Markdown preview of the results table; empty when no selection.
+        csv_path: Path of the CSV export; ``None`` when nothing was written.
+
+    Returns:
+        Messages for ``gr.ChatInterface``: strings and, last, a native file
+        message ``{"role": "assistant", "content": {"path": ...}}``. A ``gr.File``
+        component is deliberately not used: Gradio 6.27 stores it in the history as
+        a list and fails to read it back on the next turn.
+    """
+    reply: list[Any] = [answer]
+
+    # No selection means no preview and no file: the answer stands alone.
+    if preview:
+        reply.append(preview)
+
+    if csv_path:
+        reply.append(
+            {
+                "role": "assistant",
+                "content": {"path": csv_path, "alt_text": "Selected accessions (CSV)"},
+            }
+        )
+
+    return reply
+
+
 async def chat(
     message: dict[str, Any] | str,
     history: list[dict[str, Any]],
     context_json: str,
     attachments_json: str = "",
-) -> tuple[str, str, str]:
+) -> tuple[list[Any], str, str]:
     """Handle one chat turn.
 
     A new agent is created per call so nothing is shared between users; the
@@ -314,7 +410,8 @@ async def chat(
         attachments_json: Stable paths of the attachments persisted so far.
 
     Returns:
-        The assistant answer, the updated selection and the updated attachments.
+        The assistant messages (answer, results preview, CSV file), the updated
+        selection and the updated attachments.
     """
     # Normalize both message shapes into text plus files.
     if isinstance(message, dict):
@@ -361,16 +458,18 @@ async def chat(
         logger.exception("Agent turn failed")
 
         return (
-            "Something went wrong while processing your request. Please try again or rephrase it.",
+            [
+                "Something went wrong while processing your request. "
+                "Please try again or rephrase it."
+            ],
             context_json,
             attachments_json,
         )
 
-    return (
-        turn.answer + format_document_errors([*upload_errors, *turn.document_errors]),
-        turn.context_json,
-        attachments_json,
-    )
+    _table, csv_path, preview = build_results(turn.context_json)
+    answer = turn.answer + format_document_errors([*upload_errors, *turn.document_errors])
+
+    return build_reply(answer, preview, csv_path), turn.context_json, attachments_json
 
 
 def build_app() -> gr.Blocks:
@@ -379,6 +478,20 @@ def build_app() -> gr.Blocks:
         # Serialized AccessionContext and persisted attachment paths, per browser session.
         selection_state = gr.State("")
         attachments_state = gr.State("")
+
+        # Results components kept for an optional side panel; the preview and the CSV
+        # are delivered inside the chat messages (see build_reply), so they are not
+        # rendered nor wired as outputs.
+        results_table = gr.Dataframe(  # noqa: F841 - intentionally unused for now
+            label="Selected accessions (data, evidence and criteria)",
+            interactive=False,
+            show_search="search",
+            wrap=True,
+            render=False,
+        )
+        results_file = gr.File(  # noqa: F841 - intentionally unused for now
+            label="Download the selection as CSV", render=False
+        )
 
         gr.ChatInterface(
             fn=chat,
@@ -404,4 +517,9 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     app = build_app()
-    app.launch(server_name=SETTINGS.server.host, server_port=SETTINGS.server.port)
+    # The CSV exports live outside Gradio's cache, so the folder must be allowed explicitly.
+    app.launch(
+        server_name=SETTINGS.server.host,
+        server_port=SETTINGS.server.port,
+        allowed_paths=[str(SETTINGS.storage.exports_dir.resolve())],
+    )

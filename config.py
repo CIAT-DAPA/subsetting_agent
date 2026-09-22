@@ -63,10 +63,12 @@ class StorageSettings:
     Attributes:
         uploads_dir: Durable copies of every attachment.
         document_cache_dir: Markdown conversions of PDFs.
+        exports_dir: CSV exports of the selection results table.
     """
 
     uploads_dir: Path = Path("data") / "uploads"
     document_cache_dir: Path = Path("data") / "documents"
+    exports_dir: Path = Path("data") / "exports"
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,7 @@ class Settings:
             storage=StorageSettings(
                 uploads_dir=Path(_env("UPLOADS_DIR", storage.uploads_dir)),
                 document_cache_dir=Path(_env("DOCUMENT_CACHE_DIR", storage.document_cache_dir)),
+                exports_dir=Path(_env("EXPORTS_DIR", storage.exports_dir)),
             ),
             agent=AgentSettings(
                 model=_env("SUBSETTING_AGENT_MODEL", agent.model),

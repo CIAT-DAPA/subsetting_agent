@@ -157,9 +157,10 @@ class TestChatHandler:
             {"role": "user", "content": {"path": str(paper)}},
         ]
 
-        answer, state, attachments = await chat(
+        reply, state, attachments = await chat(
             {"text": "now", "files": [str(new_pdf), str(sheet)]}, history, "{}", ""
         )
+        answer = reply[0]
 
         assert answer.startswith("done")
         assert "bad.pdf" in answer
@@ -170,6 +171,8 @@ class TestChatHandler:
         assert all(Path(p).parent == tmp_path / "uploads" for p in captured["documents"])
         assert set(json.loads(attachments)) == {str(paper), str(new_pdf), str(sheet)}
         assert captured["context"] == "{}"
+        # An empty selection adds neither a preview nor a CSV message.
+        assert reply == [answer]
         assert [m["content"] for m in captured["memory"]] == ["earlier", "ok"]
 
     async def test_attachment_only_message_gets_default_text(
@@ -215,8 +218,8 @@ class TestChatHandler:
 
         monkeypatch.setattr(app_module, "SubsettingAgent", BrokenAgent)
 
-        answer, state, attachments = await chat("hello", [], "previous", "{}")
+        reply, state, attachments = await chat("hello", [], "previous", "{}")
 
-        assert "Something went wrong" in answer
+        assert "Something went wrong" in reply[0]
         assert state == "previous"
         assert attachments == "{}"

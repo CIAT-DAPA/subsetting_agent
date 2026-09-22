@@ -22,7 +22,11 @@ def settings_with_uploads(directory: Path) -> Settings:
         directory: Uploads directory for the test.
     """
     return Settings(
-        storage=StorageSettings(uploads_dir=directory, document_cache_dir=directory / "docs")
+        storage=StorageSettings(
+            uploads_dir=directory,
+            document_cache_dir=directory / "docs",
+            exports_dir=directory / "exports",
+        )
     )
 
 
@@ -164,11 +168,11 @@ class TestAppAttachmentState:
 
         monkeypatch.setattr(app_module, "SubsettingAgent", FakeAgent)
 
-        answer, context_state, attachments_state = await app_module.chat(
+        reply, context_state, attachments_state = await app_module.chat(
             {"text": "load", "files": [str(sheet)]}, [], "", ""
         )
 
-        assert answer == "ok"
+        assert reply[0] == "ok"
         assert captured["documents"] == []
         assert len(captured["sheets"]) == 1
         assert Path(captured["sheets"][0]).parent == tmp_path / "uploads"

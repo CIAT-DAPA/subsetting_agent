@@ -53,8 +53,10 @@ subsetting_agent/
 │   ├── pdf_converter.py        #   convert_pdf_to_markdown (cached on disk)
 │   ├── document_store.py       #   DocumentStore: sections, outline, lexical search
 │   └── models.py
+├── reporting/                  # Results table of the selection + CSV export
+│   └── selection_table.py      #   build_selection_table, to_markdown, write_csv
 ├── tools/                      # Tools exposed to the LLM + session state
-│   ├── accession_context.py    #   AccessionContext: selection, stage, steps, clusters (JSON)
+│   ├── accession_context.py    #   AccessionContext: selection, stage, steps, clusters, evidence (JSON)
 │   ├── services.py             #   ToolServices: clients, document store, context, catalog
 │   ├── genesys_tools.py        #   passport + trait tools (Genesys mode)
 │   ├── file_tools.py           #   spreadsheet loading tools (file mode)
@@ -140,6 +142,20 @@ The chat accepts text, PDF attachments and one accession spreadsheet
 (`.xlsx`, `.xls`, `.csv`, `.tsv`). Attaching a spreadsheet switches the whole
 conversation to file mode (see *Two accession sources*).
 
+### Results table and CSV download
+
+After every turn the app rebuilds, from the selection state and without the
+model's help, a table with one row per selected accession: passport data
+(number, institute, crop, taxon, country, coordinates, cellid), the **evidence**
+each tool recorded while narrowing the selection (the trait value that passed
+the condition, the climate cluster and the mean of every indicator used at the
+site, the document that cited the accession, the cluster kept) and a `criteria`
+column repeating the steps applied. Right after the assistant's answer the chat
+shows a Markdown preview of the first 20 rows (copy it straight from the
+message) followed by the downloadable CSV, written to `EXPORTS_DIR` as
+`YYYYMMDD_HHmmss_<hash>_selection.csv`. Preview and file messages are not
+replayed to the model on later turns.
+
 ### Where uploaded files live
 
 Gradio stores attachments in its own temporary cache (`GRADIO_TEMP_DIR`), which
@@ -201,6 +217,7 @@ agent = SubsettingAgent(settings)           # builds clients, stores and grid fr
 | `SUBSETTING_API_AUTH_SCHEME` | `API-Token` | Scheme placed before the token in the `Authorization` header |
 | `UPLOADS_DIR` | `data/uploads` | Durable copies of every attachment (PDF, Excel/CSV) |
 | `DOCUMENT_CACHE_DIR` | `data/documents` (in `.env.example`; code default is the system temp dir) | Where PDF conversions are cached |
+| `EXPORTS_DIR` | `data/exports` | CSV of the selected accessions written after each turn |
 | `GRADIO_TEMP_DIR` | `data/gradio_tmp` | Gradio's own temporary upload cache |
 | `SUBSETTING_AGENT_MODEL` | `ollama_chat/llama3.1:8b` | litellm model name |
 | `SUBSETTING_AGENT_API_BASE` | `http://localhost:11434` | LLM endpoint |

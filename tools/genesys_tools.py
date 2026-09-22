@@ -366,6 +366,52 @@ def observation_matches(
     return False, compared
 
 
+def matching_observation_value(
+    observations: AccessionObservations,
+    *,
+    descriptor: str,
+    min_value: float | None,
+    max_value: float | None,
+    equals: str | None,
+) -> Any:
+    """Return the first observed value that satisfies the trait condition.
+
+    Companion of :func:`observation_matches` used to record evidence: it walks
+    the same keys and returns the value that made the accession pass, so the
+    results table can show it next to the accession.
+
+    Args:
+        observations: Observations of one accession.
+        descriptor: Descriptor keyword, column name or UUID.
+        min_value: Lower bound for numeric traits.
+        max_value: Upper bound for numeric traits.
+        equals: Expected value for categorical traits.
+
+    Returns:
+        The matching value, or ``None`` when no value satisfies the condition.
+    """
+    wanted = normalize_text(descriptor)
+
+    # Same walk as observation_matches, but the value is returned instead of a flag.
+    for record in observations.all_records:
+        pairs = _flatten(record)
+        mentions_descriptor = any(
+            isinstance(v, str) and wanted and wanted in normalize_text(v) for _, v in pairs
+        )
+
+        for key, value in pairs:
+            key_matches = wanted and wanted in normalize_text(key)
+            value_field = key.rsplit(".", 1)[-1].lower() in ("value", "val", "observation")
+
+            if not key_matches and not (mentions_descriptor and value_field):
+                continue
+
+            if _value_matches(value, min_value=min_value, max_value=max_value, equals=equals):
+                return value
+
+    return None
+
+
 async def filter_selection_by_trait(
     services: ToolServices,
     *,
@@ -419,6 +465,8 @@ async def filter_selection_by_trait(
     kept: list[str] = []
     without_data = 0
     compared_keys: set[str] = set()
+    # uuid -> observed value that satisfied the condition (evidence for the table)
+    matched_values: dict[str, Any] = {}
 
     # Classify each accession: matched, no observations, or observed but not matching.
     for uuid, observations in results:
@@ -437,10 +485,22 @@ async def filter_selection_by_trait(
 
         if matched:
             kept.append(uuid)
+            matched_values[uuid] = matching_observation_value(
+                observations,
+                descriptor=descriptor,
+                min_value=min_value,
+                max_value=max_value,
+                equals=equals,
+            )
 
     condition = equals if equals is not None else f"[{min_value}, {max_value}]"
     description = f"Trait '{descriptor}' {condition} (checked {len(records)} accessions)"
     context.keep(kept, stage=Stage.TRAITS, description=description)
+
+    # Record the observed value per kept accession so the results table shows
+    # why each one satisfies the trait condition.
+    for uuid, value in matched_values.items():
+        context.add_evidence([uuid], **{f"trait: {descriptor}": value})
 
     result: dict[str, Any] = {
         "checked": len(records),

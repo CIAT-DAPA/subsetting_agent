@@ -142,4 +142,7 @@ async def keep_accessions_from_documents(
 
     context.keep(kept, stage=Stage.DOCUMENTS, description=f"Documents: {reason}")
 
+    # The reason (document title and passage) is the evidence of this stage.
+    context.add_evidence(kept, **{"document evidence": reason})
+
     return {"kept": len(kept), "not_found": missing[:20], "summary": context.summary()}

@@ -39,6 +39,7 @@ packages = [
     "document_processing",
     "tools",
     "prompts",
+    "reporting",
 ]
 
 [tool.uv]

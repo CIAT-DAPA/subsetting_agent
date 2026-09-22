@@ -51,6 +51,7 @@ class TestSettings:
         monkeypatch.setenv("SUBSETTING_GRID_CELLSIZE", "1")
         monkeypatch.setenv("UPLOADS_DIR", "/srv/uploads")
         monkeypatch.setenv("DOCUMENT_CACHE_DIR", "/srv/docs")
+        monkeypatch.setenv("EXPORTS_DIR", "/srv/exports")
         monkeypatch.setenv("SUBSETTING_AGENT_MODEL", "ollama_chat/llama3.1:70b")
         monkeypatch.setenv("SUBSETTING_AGENT_MAX_ITERATIONS", "9")
         monkeypatch.setenv("SUBSETTING_AGENT_PORT", "9000")
@@ -69,6 +70,7 @@ class TestSettings:
         assert settings.grid.ncols == 360 and settings.grid.cellsize == 1.0
         assert settings.storage.uploads_dir == Path("/srv/uploads")
         assert settings.storage.document_cache_dir == Path("/srv/docs")
+        assert settings.storage.exports_dir == Path("/srv/exports")
         assert settings.agent.model == "ollama_chat/llama3.1:70b"
         assert settings.agent.max_iterations == 9
         assert settings.server.port == 9000
