@@ -74,45 +74,6 @@ _ALGORITHM_COLUMNS: dict[ClusteringAlgorithm, str] = {
 # --------------------------------------------------------------------------- #
 
 
-class Indicator(BaseModel):
-    """One indicator as listed by ``GET /indicators``.
-
-    Attributes:
-        id: Internal identifier of the indicator.
-        name: Display name (e.g. "Total precipitation").
-        pref: Short code used as column prefix in cluster results (e.g. "prec").
-        indicator_type: Storage/filtering type of the indicator.
-        crop: Crop the indicator belongs to. Generic indicators use a generic
-            crop label (as stored by the API), specific ones name the crop.
-        category: Stress group the indicator belongs to (e.g. "Drought stress").
-        unit: Measurement unit reported by the API.
-    """
-
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
-
-    id: str
-    name: str
-    pref: str
-    indicator_type: IndicatorType
-    crop: str
-    category: str
-    unit: str
-
-
-class IndicatorCategory(BaseModel):
-    """Group of indicators sharing a stress category, as returned by ``GET /indicators``.
-
-    Attributes:
-        category: Name of the stress group.
-        indicators: Indicators that belong to the group.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    category: str
-    indicators: list[Indicator]
-
-
 class IndicatorPeriod(BaseModel):
     """One dataset of an indicator for a period and scenario (``GET /indicator-period``).
 
@@ -129,6 +90,48 @@ class IndicatorPeriod(BaseModel):
     indicator: str
     period: str
     ssp: str
+
+
+class Indicator(BaseModel):
+    """One indicator as listed by ``GET /indicators``.
+
+    Attributes:
+        id: Internal identifier of the indicator.
+        name: Display name (e.g. "Total precipitation").
+        pref: Short code used as column prefix in cluster results (e.g. "prec").
+        indicator_type: Storage/filtering type of the indicator.
+        crop: Crop the indicator belongs to. Generic indicators use a generic
+            crop label (as stored by the API), specific ones name the crop.
+        category: Stress group the indicator belongs to (e.g. "Drought stress").
+        unit: Measurement unit reported by the API.
+        periods: Datasets available for the indicator (period x scenario). Filled
+            by the client from ``GET /indicator-period``.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: str
+    name: str
+    pref: str
+    indicator_type: IndicatorType
+    crop: str
+    category: str
+    unit: str
+    periods: list[IndicatorPeriod] = Field(default_factory=list)
+
+
+class IndicatorCategory(BaseModel):
+    """Group of indicators sharing a stress category, as returned by ``GET /indicators``.
+
+    Attributes:
+        category: Name of the stress group.
+        indicators: Indicators that belong to the group.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    category: str
+    indicators: list[Indicator]
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +192,7 @@ class CropCellIds(BaseModel):
 
 
 class IndicatorFilter(BaseModel):
-    """A filter over one indicator for ``/subset``, ``/cluster`` and ``/core-collection``.
+    """One indicator to include in the multivariate analysis of ``/cluster``.
 
     Attributes:
         type: Storage type of the indicator; decides how the API aggregates it.
@@ -198,8 +201,6 @@ class IndicatorFilter(BaseModel):
         indicator_periods: Ids of the indicator periods to read values from.
         months: Month window for monthly indicators. Ignored by the API for
             extracted and categorical indicators, but always sent for safety.
-        range: Inclusive ``[min, max]`` of the aggregated value. Only ``/subset``
-            applies it; ``/cluster`` and ``/core-collection`` read the raw values.
         crop: Crop name; required for crop-specific indicators.
     """
 
@@ -207,7 +208,6 @@ class IndicatorFilter(BaseModel):
     name: str
     indicator_periods: list[str] = Field(min_length=1)
     months: MonthWindow = Field(default_factory=lambda: MonthWindow(start=1, end=12))
-    range: tuple[float, float] | None = None
     crop: str | None = None
 
     @model_validator(mode="after")
@@ -222,20 +222,11 @@ class IndicatorFilter(BaseModel):
 
         return self
 
-    @field_validator("range")
-    @classmethod
-    def _check_range_order(cls, value: tuple[float, float] | None) -> tuple[float, float] | None:
-        """Validate that the lower bound of the range is not above the upper bound."""
-        if value is not None and value[0] > value[1]:
-            raise ValueError(f"Invalid range {value}: min is greater than max.")
-
-        return value
-
     def to_api(self) -> dict[str, Any]:
         """Serialize to the dictionary consumed by the API.
 
-        The API reads ``indicator`` (list of period ids), ``months``, ``range``,
-        ``type``, ``name`` and, for specific indicators, ``crop``.
+        The API reads ``indicator`` (list of period ids), ``months``, ``type``,
+        ``name`` and, for specific indicators, ``crop``.
         """
         payload: dict[str, Any] = {
             "type": self.type.value,
@@ -243,11 +234,6 @@ class IndicatorFilter(BaseModel):
             "indicator": self.indicator_periods,
             "months": self.months.to_api(),
         }
-
-        # ``/subset`` is the only endpoint that reads the range; the client
-        # enforces its presence there, so it is omitted when not provided.
-        if self.range is not None:
-            payload["range"] = list(self.range)
 
         # Only specific indicators carry a crop; sending it for the others is
         # harmless but keeps the payload identical to the web client's.
@@ -313,82 +299,6 @@ class ClusterRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 # Response models
 # --------------------------------------------------------------------------- #
-
-
-class IndicatorRange(BaseModel):
-    """Observed min/max of one indicator over the selected cells (``/indicators-range``).
-
-    Attributes:
-        crop: Crop the range was computed for.
-        indicator: Indicator display name.
-        min: Minimum aggregated value observed.
-        max: Maximum aggregated value observed.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    crop: str
-    indicator: str
-    min: float | None = None
-    max: float | None = None
-
-
-class IndicatorRangesResult(BaseModel):
-    """Response of ``POST /indicators-range``.
-
-    Attributes:
-        min_max: Observed range per indicator and crop.
-        quantile: Quartile summaries, kept raw for charting purposes.
-        proportion: Category proportions for categorical indicators, kept raw.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    min_max: list[IndicatorRange] = Field(default_factory=list)
-    quantile: list[dict[str, Any]] = Field(default_factory=list)
-    proportion: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class FilteredCrop(BaseModel):
-    """Cellids of one crop that passed the univariate filters (``/subset``).
-
-    Attributes:
-        crop: Crop name.
-        cellids: Cellids that satisfied every indicator range.
-    """
-
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    crop: str
-    # The API serializes the list under the singular key ``cellid``.
-    cellids: list[int] = Field(alias="cellid")
-
-
-class SubsetResult(BaseModel):
-    """Response of ``POST /subset``.
-
-    Attributes:
-        filtered: Surviving cellids grouped by crop.
-        quantile: Quartile summaries per indicator, kept raw.
-        proportion: Category proportions for categorical indicators, kept raw.
-    """
-
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    filtered: list[FilteredCrop] = Field(alias="filtered_cellids", default_factory=list)
-    quantile: list[dict[str, Any]] = Field(default_factory=list)
-    proportion: list[dict[str, Any]] = Field(default_factory=list)
-
-    def all_cellids(self) -> list[int]:
-        """Return the distinct cellids that passed the filters, across crops."""
-        cellids: list[int] = []
-
-        # Collect the cellids of every crop; duplicates are removed afterwards
-        # because the same cell can host accessions of several crops.
-        for crop in self.filtered:
-            cellids.extend(crop.cellids)
-
-        return list(dict.fromkeys(cellids))
 
 
 class ClusterRow(BaseModel):
@@ -514,55 +424,58 @@ class ClusterResult(BaseModel):
 
         return dict(sorted(grouped.items()))
 
+    def cluster_statistics(
+        self,
+        algorithm: ClusteringAlgorithm = ClusteringAlgorithm.AGGLOMERATIVE,
+        *,
+        crop: str | None = None,
+    ) -> dict[int, dict[str, dict[str, float]]]:
+        """Summarize the indicator values of each cluster.
 
-class CoreCollectionResult(BaseModel):
-    """Response of ``POST /core-collection``.
+        Value columns are named ``<pref>_month<N>`` or ``<pref>_value``; all the
+        values sharing a prefix are pooled per cluster, which gives the typical
+        monthly level (or the single value) of each indicator in the cluster.
 
-    Attributes:
-        cellids: Cellids selected for the core collection.
-    """
+        Args:
+            algorithm: Algorithm whose labels define the clusters.
+            crop: When given, only rows of this crop are considered.
 
-    model_config = ConfigDict(extra="ignore")
+        Returns:
+            ``{cluster_label: {indicator_prefix: {"mean", "min", "max", "n"}}}``,
+            noise rows excluded.
+        """
+        column = algorithm.result_column
+        pooled: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
 
-    cellids: list[int] = Field(default_factory=list)
+        # Pool the numeric values of every indicator per cluster.
+        for row in self.rows:
+            if crop is not None and row.crop.lower() != crop.lower():
+                continue
 
+            label = row.labels.get(column)
 
-class CellIndicatorData(BaseModel):
-    """Indicator values of one cell (``/indicators-data``).
+            if label is None or label == -1:
+                continue
 
-    Attributes:
-        cellid: Grid cell identifier.
-        data: One entry per indicator period with its monthly or single values.
-    """
+            for key, value in row.values.items():
+                if value is None:
+                    continue
 
-    model_config = ConfigDict(extra="ignore")
+                prefix = key.rsplit("_", 1)[0] if "_" in key else key
+                pooled[label][prefix].append(float(value))
 
-    cellid: int
-    data: list[dict[str, Any]] = Field(default_factory=list)
+        statistics: dict[int, dict[str, dict[str, float]]] = {}
 
+        # Reduce each pool to compact descriptive statistics.
+        for label, indicators in sorted(pooled.items()):
+            statistics[label] = {}
 
-class IndicatorDataResult(BaseModel):
-    """Response of ``POST /indicators-data``.
+            for prefix, values in indicators.items():
+                statistics[label][prefix] = {
+                    "mean": round(sum(values) / len(values), 3),
+                    "min": round(min(values), 3),
+                    "max": round(max(values), 3),
+                    "n": float(len(values)),
+                }
 
-    Attributes:
-        cells: Indicator values grouped by cell.
-    """
-
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    cells: list[CellIndicatorData] = Field(alias="response", default_factory=list)
-
-
-class AnaloguesResult(BaseModel):
-    """Response of ``POST /analogues-multivariate``.
-
-    Attributes:
-        climate_dist: DTW distance of each cell to the reference cell over the
-            monthly indicators; entries have ``cellid`` and ``dist``.
-        soil_dist: Gower distance over value-based and categorical indicators.
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    climate_dist: list[dict[str, Any]] | None = None
-    soil_dist: list[dict[str, Any]] | None = None
+        return statistics
