@@ -136,23 +136,21 @@ class TestBuildFilter:
     """``build_filter`` produces validated filters with the right ids and types."""
 
     def test_generic_filter_defaults(self, catalog: IndicatorCatalog) -> None:
-        """Historical period, full-year window and no range by default."""
+        """Historical period and full-year window by default."""
         built = catalog.build_filter("total precipitation")
 
         assert built.type is IndicatorType.GENERIC
         assert built.name == "Total precipitation"
         assert built.indicator_periods == [PERIOD_PREC_HIST]
         assert built.months == MonthWindow(start=1, end=12)
-        assert built.range is None
         assert built.crop is None
 
-    def test_generic_filter_with_window_and_range(self, catalog: IndicatorCatalog) -> None:
-        """Tuples are accepted for the month window and the range."""
-        built = catalog.build_filter("tmax", months=(11, 2), value_range=(25.0, 35.0))
+    def test_generic_filter_with_window(self, catalog: IndicatorCatalog) -> None:
+        """Tuples are accepted for the month window."""
+        built = catalog.build_filter("tmax", months=(11, 2))
 
         assert built.indicator_periods == [PERIOD_TMAX_HIST]
         assert built.months.months() == [11, 12, 1, 2]
-        assert built.range == (25.0, 35.0)
 
     def test_specific_filter_uses_catalog_crop_label(self, catalog: IndicatorCatalog) -> None:
         """The crop stored in the catalog wins over the caller's spelling."""

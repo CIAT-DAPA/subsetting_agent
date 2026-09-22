@@ -46,7 +46,7 @@ def normalize_text(value: str) -> str:
 
 
 class IndicatorCatalog:
-    """Cached view of ``GET /indicators`` and ``GET /indicator-period``.
+    """Cached view of the indicators and their datasets (``SubsettingClient.get_indicators``).
 
     The catalog must be loaded with :meth:`load` (or :meth:`from_client`) before
     the lookup methods are used.
@@ -66,7 +66,7 @@ class IndicatorCatalog:
 
         Args:
             categories: Indicator categories to start with.
-            periods: Indicator periods to start with.
+            periods: Indicator periods to attach when not nested in the indicators.
         """
         self.categories: list[IndicatorCategory] = []
         self.indicators: list[Indicator] = []
@@ -75,7 +75,7 @@ class IndicatorCatalog:
 
         # Populate the derived indexes when initial data is provided.
         if categories is not None or periods is not None:
-            self.replace(categories or [], periods or [])
+            self.replace(categories or [], periods)
 
     # ------------------------------------------------------------------ #
     # Loading
@@ -94,32 +94,43 @@ class IndicatorCatalog:
         return catalog
 
     async def load(self, client: SubsettingClient) -> None:
-        """Download indicators and periods and rebuild the internal indexes.
+        """Download the indicators (with their datasets) and rebuild the indexes.
 
         Args:
             client: Configured Subsetting client.
         """
-        categories = await client.get_indicators()
-        periods = await client.get_indicator_periods()
-        self.replace(categories, periods)
+        self.replace(await client.get_indicators())
 
-    def replace(self, categories: list[IndicatorCategory], periods: list[IndicatorPeriod]) -> None:
+    def replace(
+        self,
+        categories: list[IndicatorCategory],
+        periods: list[IndicatorPeriod] | None = None,
+    ) -> None:
         """Replace the catalog content and rebuild the lookup indexes.
 
         Args:
-            categories: Indicator categories.
-            periods: Indicator periods.
+            categories: Indicator categories; each indicator may carry its periods.
+            periods: Extra periods to attach (tests); merged with the nested ones.
         """
         self.categories = list(categories)
         self.indicators = [
             indicator for category in categories for indicator in category.indicators
         ]
-        self.periods = list(periods)
         self._periods_by_indicator = {}
 
-        # Index periods by indicator id so lookups do not scan the whole list.
-        for period in periods:
-            self._periods_by_indicator.setdefault(period.indicator, []).append(period)
+        # Periods nested in the indicators are the primary source.
+        for indicator in self.indicators:
+            for period in indicator.periods:
+                self._periods_by_indicator.setdefault(indicator.id, []).append(period)
+
+        # Extra periods are attached to their indicator when not already present.
+        for period in periods or []:
+            known = self._periods_by_indicator.setdefault(period.indicator, [])
+
+            if all(existing.id != period.id for existing in known):
+                known.append(period)
+
+        self.periods = [p for plist in self._periods_by_indicator.values() for p in plist]
 
     @property
     def is_loaded(self) -> bool:
@@ -240,7 +251,6 @@ class IndicatorCatalog:
         *,
         crop: str | None = None,
         months: MonthWindow | tuple[int, int] | None = None,
-        value_range: tuple[float, float] | None = None,
         ssp: str | None = "historical",
         period: str | None = None,
     ) -> IndicatorFilter:
@@ -252,7 +262,6 @@ class IndicatorCatalog:
                 disambiguate names shared across crops.
             months: Month window; a ``(start, end)`` tuple is accepted. Defaults
                 to the full year.
-            value_range: Inclusive ``(min, max)`` used by ``/subset``.
             ssp: Scenario to read. Defaults to historical data; ``None`` selects
                 every available period.
             period: Optional period label to narrow the selection further.
@@ -291,7 +300,6 @@ class IndicatorCatalog:
             name=resolved.name,
             indicator_periods=[p.id for p in periods],
             months=window,
-            range=value_range,
             crop=filter_crop,
         )
 
