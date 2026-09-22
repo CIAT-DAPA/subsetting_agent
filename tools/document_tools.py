@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from tools.accession_context import Stage
-from tools.services import ToolServices
+from tools.services import ToolServices, empty_selection_error
 
 
 async def list_documents(services: ToolServices) -> dict[str, Any]:
@@ -115,7 +115,7 @@ async def keep_accessions_from_documents(
     context = services.context
 
     if context.is_empty:
-        return {"error": "No accessions selected yet. Run select_accessions first."}
+        return empty_selection_error(services)
 
     wanted = {value.strip().lower() for value in accession_numbers if value and value.strip()}
 

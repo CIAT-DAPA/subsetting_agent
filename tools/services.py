@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from document_processing.document_store import DocumentStore
 from genesys_sdk.client import GenesysClient
@@ -95,3 +96,22 @@ class ToolServices:
             await self.genesys.aclose()
 
         await self.subsetting.aclose()
+
+
+def empty_selection_error(services: ToolServices) -> dict[str, Any]:
+    """Build the error a tool returns when no accession is selected yet.
+
+    The hint names the tool that starts the selection in the current source, so
+    the model is never told to call a Genesys tool while in file mode.
+
+    Args:
+        services: Shared services; their ``source`` decides the hint.
+    """
+    # Each source has its own stage-1 tool; point the model to the right one.
+    if services.source == SOURCE_FILE:
+        hint = "Run load_accessions_from_file first."
+
+    else:
+        hint = "Run select_accessions first."
+
+    return {"error": f"No accessions selected yet. {hint}"}

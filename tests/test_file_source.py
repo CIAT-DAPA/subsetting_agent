@@ -18,6 +18,7 @@ from subsetting_sdk.grid import DEFAULT_GRID, GridSpec, cellid_from_coordinates
 from tests.test_agent import FakeLLM, llm_response, tool_call
 from tests.test_tools import SUBSETTING, mock_catalog
 from tools import AccessionContext, Stage, ToolServices, build_registry
+from tools.accession_context import AccessionRecord
 from tools.registry import FILE_ONLY_TOOLS, GENESYS_ONLY_TOOLS
 
 
@@ -433,3 +434,107 @@ class TestAgentModeSelection:
 
         assert with_file.genesys is None and with_file.source == "file"
         assert without_file.genesys is not None and without_file.source == "genesys"
+
+
+class TestAutomaticFileLoad:
+    """In file mode the spreadsheet is loaded before the model runs."""
+
+    async def test_loads_file_before_first_llm_call(
+        self, monkeypatch: pytest.MonkeyPatch, file_services: ToolServices
+    ) -> None:
+        """The selection exists before the LLM answers and the note reports it."""
+        fake = FakeLLM([llm_response("Your file has 3 accessions.")])
+        monkeypatch.setattr(agent_module, "acompletion", fake)
+        agent = SubsettingAgent(services=file_services)
+
+        turn = await agent.chat(
+            "cluster my list", accession_file_paths=file_services.accession_files
+        )
+
+        user_note = fake.calls[0]["messages"][-1]["content"]
+        assert "file loaded automatically: 3 accessions" in user_note
+        assert "0 rows rejected" in user_note
+        assert "file crop:" in user_note  # the fixture has no crop column
+        context = AccessionContext.from_json(turn.context_json)
+        assert context.count == 3 and context.stage == Stage.PASSPORT
+
+    async def test_existing_selection_is_not_reloaded(
+        self, monkeypatch: pytest.MonkeyPatch, file_services: ToolServices
+    ) -> None:
+        """A refinement turn continues from the previous selection untouched."""
+        previous = AccessionContext()
+        previous.set_file_selection(
+            [AccessionRecord(uuid="G009", accession_number="G009", cellid=42)],
+            file_name="accessions.xlsx",
+            description="kept",
+        )
+        fake = FakeLLM([llm_response("Still 1 accession.")])
+        monkeypatch.setattr(agent_module, "acompletion", fake)
+        agent = SubsettingAgent(services=file_services)
+
+        turn = await agent.chat(
+            "now the driest",
+            accession_file_paths=file_services.accession_files,
+            context_json=previous.to_json(),
+        )
+
+        user_note = fake.calls[0]["messages"][-1]["content"]
+        assert "file loaded automatically" not in user_note
+        assert "1 accessions selected" in user_note
+        assert AccessionContext.from_json(turn.context_json).count == 1
+
+    async def test_failed_load_is_reported_in_note(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Undetectable columns produce a failure note instead of an empty selection."""
+        path = write_accessions(tmp_path / "odd.csv", [{"code": "A1", "foo": 1, "bar": 2}])
+        services = ToolServices(
+            subsetting=SubsettingClient(SUBSETTING, max_retries=0),
+            documents=DocumentStore(tmp_path / "cache"),
+            accession_files=[path],
+        )
+        fake = FakeLLM([llm_response("Which column has the latitude?")])
+        monkeypatch.setattr(agent_module, "acompletion", fake)
+        agent = SubsettingAgent(services=services)
+
+        turn = await agent.chat("load", accession_file_paths=[path])
+
+        user_note = fake.calls[0]["messages"][-1]["content"]
+        assert "file load failed:" in user_note
+        assert "load_accessions_from_file with explicit columns" in user_note
+        assert AccessionContext.from_json(turn.context_json).is_empty
+
+    async def test_several_files_are_not_loaded_blindly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two spreadsheets require the user's choice; nothing is loaded."""
+        rows = [{"Accession": "G1", "Latitude": 4.5, "Longitude": -74.1}]
+        first = write_accessions(tmp_path / "a.csv", rows)
+        second = write_accessions(tmp_path / "b.csv", rows)
+        services = ToolServices(
+            subsetting=SubsettingClient(SUBSETTING, max_retries=0),
+            documents=DocumentStore(tmp_path / "cache"),
+            accession_files=[first, second],
+        )
+        fake = FakeLLM([llm_response("Which file?")])
+        monkeypatch.setattr(agent_module, "acompletion", fake)
+        agent = SubsettingAgent(services=services)
+
+        turn = await agent.chat("load", accession_file_paths=[first, second])
+
+        assert "file load skipped: 2 spreadsheets" in fake.calls[0]["messages"][-1]["content"]
+        assert AccessionContext.from_json(turn.context_json).is_empty
+
+    def test_empty_selection_error_names_the_stage_1_tool(
+        self, file_services: ToolServices, tmp_path: Path
+    ) -> None:
+        """The hint follows the source: file tool in file mode, Genesys tool otherwise."""
+        from tools.services import empty_selection_error
+
+        genesys_services = ToolServices(
+            subsetting=SubsettingClient(SUBSETTING, max_retries=0),
+            documents=DocumentStore(tmp_path / "cache2"),
+        )
+
+        assert "load_accessions_from_file" in empty_selection_error(file_services)["error"]
+        assert "select_accessions" in empty_selection_error(genesys_services)["error"]

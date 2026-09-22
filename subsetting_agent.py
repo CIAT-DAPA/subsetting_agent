@@ -26,6 +26,7 @@ from genesys_sdk.client import GenesysClient
 from prompts.system_prompt import build_system_prompt
 from subsetting_sdk.client import SubsettingClient
 from tools.accession_context import AccessionContext
+from tools.file_tools import load_accessions_from_file
 from tools.registry import ToolRegistry, build_registry
 from tools.services import SOURCE_FILE, SOURCE_GENESYS, ToolServices
 
@@ -169,12 +170,19 @@ class SubsettingAgent:
         services.context = AccessionContext.from_json(context_json)
         document_errors = self._load_documents(services, document_paths or [])
 
+        # In file mode stage 1 is deterministic: the spreadsheet is loaded here,
+        # before the model runs, instead of relying on it to call the tool.
+        file_load_note = await self._autoload_accession_file(services)
+
         # The registry and prompt follow the source; an injected registry wins (tests).
         registry = self._registry or build_registry(services.source)
         system_prompt = build_system_prompt(registry.describe(), services.source)
 
         self.memory.append(
-            {"role": "user", "content": self._annotate_message(user_message, services)}
+            {
+                "role": "user",
+                "content": self._annotate_message(user_message, services, file_load_note),
+            }
         )
 
         try:
@@ -252,12 +260,73 @@ class SubsettingAgent:
         return errors
 
     @staticmethod
-    def _annotate_message(user_message: str, services: ToolServices) -> str:
+    async def _autoload_accession_file(services: ToolServices) -> str | None:
+        """Load the user's accession spreadsheet when the selection is still empty.
+
+        Only runs in file mode. When a previous turn already produced a selection
+        nothing is done, so refinements continue from it. The model keeps the
+        ``load_accessions_from_file`` tool for reloads with explicit columns or a
+        default crop.
+
+        Args:
+            services: Services of the turn (source, files and selection).
+
+        Returns:
+            A bracketed note describing the outcome for the model, or ``None``
+            when no automatic load was attempted.
+        """
+        # Genesys mode has no file to load; an existing selection must be kept.
+        if services.source != SOURCE_FILE or not services.context.is_empty:
+            return None
+
+        # Several files need the user's choice; the model asks with list_accession_files.
+        if len(services.accession_files) != 1:
+            names = ", ".join(path.name for path in services.accession_files)
+            return (
+                f"[file load skipped: {len(services.accession_files)} spreadsheets uploaded "
+                f"({names}); ask the user which one to load, then call "
+                "load_accessions_from_file with file_name]"
+            )
+
+        result = await load_accessions_from_file(services)
+
+        # A failed load (unreadable file, undetected columns) is reported, not hidden,
+        # so the model can ask the user for the column names and reload.
+        if "error" in result:
+            logger.warning("Automatic accession file load failed: %s", result["error"])
+            return (
+                f"[file load failed: {result['error']} Ask the user for the missing "
+                "information and call load_accessions_from_file with explicit columns]"
+            )
+
+        report = result["report"]
+        note = (
+            f"[file loaded automatically: {report['accepted']} accessions from "
+            f"{report['file_name']}, {report['rejected_count']} rows rejected; the selection "
+            "is ready, do NOT call load_accessions_from_file again unless the user asks for "
+            "another file or crop]"
+        )
+
+        # No crop known means crop-specific indicators will need a default_crop.
+        if "note" in result:
+            note += f"\n[file crop: {result['note']}]"
+
+        logger.info(
+            "Loaded %s accessions automatically from %s", report["accepted"], report["file_name"]
+        )
+
+        return note
+
+    @staticmethod
+    def _annotate_message(
+        user_message: str, services: ToolServices, file_load_note: str | None = None
+    ) -> str:
         """Append a short state note to the user message so the model knows the context.
 
         Args:
             user_message: Original text.
             services: Services holding the selection and documents.
+            file_load_note: Outcome of the automatic spreadsheet load, if any.
         """
         notes = []
         context = services.context
@@ -269,6 +338,10 @@ class SubsettingAgent:
 
         elif services.source == SOURCE_GENESYS:
             notes.append("[accession source: Genesys API]")
+
+        # Report the automatic load so the model reports it instead of redoing it.
+        if file_load_note:
+            notes.append(file_load_note)
 
         # Tell the model about an existing selection so it continues instead of restarting.
         if not context.is_empty:

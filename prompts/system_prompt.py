@@ -158,17 +158,21 @@ GENESYS_STAGES_1_2 = """\
 If the user did not mention a trait, skip this stage."""
 
 FILE_STAGES_1_2 = """\
-### Stage 1 - LOAD THE ACCESSION FILE (always first)
-1a. If the selection is empty, call load_accessions_from_file. Columns (identifier,
-    latitude, longitude, optional crop) are detected automatically.
-1b. If the tool reports that a column could not be detected, call list_accession_files
-    if needed, ask the user which column holds the identifier or the coordinates, and
-    call load_accessions_from_file again with id_column / latitude_column /
-    longitude_column.
+### Stage 1 - THE ACCESSION FILE (already loaded for you)
+1a. The spreadsheet is loaded AUTOMATICALLY before you run. The user message ends with
+    a note "[file loaded automatically: N accessions ...]": the selection already exists.
+    Do NOT call load_accessions_from_file again; just report the counts and continue
+    with the stages the request needs.
+1b. If the note says "[file load failed: ...]", read the reason (a column could not be
+    detected, the file is unreadable), ask the user which column holds the identifier or
+    the coordinates, and call load_accessions_from_file with id_column / latitude_column /
+    longitude_column. If the note says "[file load skipped: several spreadsheets]", ask
+    which file to use (list_accession_files shows the names) and call
+    load_accessions_from_file with file_name.
 1c. Report how many rows were loaded, how many were rejected and why (invalid
     coordinates, outside the indicator grid, duplicates).
 1d. If the user asks for crop-specific climate indicators and the file has no crop
-    column, ask for the crop and reload with default_crop.
+    column (note "[file crop: ...]"), ask for the crop and reload with default_crop.
 
 ### Stage 2 - TRAITS
 Not available in file mode: the spreadsheet has no trait observations. If the user

@@ -130,7 +130,7 @@ class TestSystemPrompt:
 
         assert "SPREADSHEET" in text
         assert "Do NOT search Genesys" in text
-        assert "Stage 1 - LOAD THE ACCESSION FILE" in text
+        assert "Stage 1 - THE ACCESSION FILE (already loaded for you)" in text
         assert "Not available in file mode" in text
         assert "select_accessions with the agreed criteria" not in text
 

@@ -17,7 +17,7 @@ from subsetting_sdk.models import (
     MonthWindow,
 )
 from tools.accession_context import Stage
-from tools.services import ToolServices
+from tools.services import ToolServices, empty_selection_error
 
 
 def _month_window(month_start: int | None, month_end: int | None) -> MonthWindow:
@@ -123,7 +123,7 @@ async def cluster_selection_by_climate(
     context = services.context
 
     if context.is_empty:
-        return {"error": "No accessions selected yet. Run select_accessions first."}
+        return empty_selection_error(services)
 
     cellid_list = context.cellids_by_crop()
 

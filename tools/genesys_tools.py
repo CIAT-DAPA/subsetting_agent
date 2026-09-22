@@ -19,7 +19,7 @@ from genesys_sdk.models import (
 )
 from subsetting_sdk.catalog import normalize_text
 from tools.accession_context import Stage
-from tools.services import ToolServices
+from tools.services import ToolServices, empty_selection_error
 
 logger = logging.getLogger(__name__)
 
@@ -387,7 +387,7 @@ async def filter_selection_by_trait(
 
     # Traits come after passport: there must be a selection to reduce.
     if context.is_empty:
-        return {"error": "No accessions selected yet. Run select_accessions first."}
+        return empty_selection_error(services)
 
     if min_value is None and max_value is None and equals is None:
         return {
