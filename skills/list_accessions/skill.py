@@ -10,8 +10,6 @@ Loading a list creates the Original list and the Candidate list in the session
 state (see :meth:`core.state.SessionState.set_original_list`).
 """
 
-import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +29,7 @@ from sdks.genesys import (
     InstituteFilter,
     TaxonomyFilter,
 )
+from skills.arguments import as_bool, as_int, as_int_list, as_list, as_upper_list
 from skills.base import Skill
 from skills.list_accessions.loaders import (
     SUPPORTED_EXTENSIONS,
@@ -55,186 +54,6 @@ def _default_client_factory() -> GenesysClient:
         A configured ``GenesysClient``.
     """
     return GenesysClient.from_settings(get_settings())
-
-
-def _flatten(items: list[Any]) -> list[Any]:
-    """Flatten nested lists/tuples of any depth into a single list.
-
-    Args:
-        items: Possibly nested list.
-
-    Returns:
-        Flat list preserving order.
-    """
-    flat: list[Any] = []
-
-    # Recurse into nested containers, append scalars as they are.
-    for item in items:
-        if isinstance(item, (list, tuple)):
-            flat.extend(_flatten(list(item)))
-        else:
-            flat.append(item)
-
-    return flat
-
-
-def _parse_text_list(text: str) -> list[Any]:
-    """Interpret a string argument that should have been a list.
-
-    Small models often serialise arrays as text: ``'["COL","PER"]'``, ``'[300]'``
-    or ``'300, 100'``. JSON is tried first, then common separators.
-
-    Args:
-        text: Raw string sent by the model.
-
-    Returns:
-        The items found in the text (possibly a single item).
-    """
-    stripped = text.strip()
-
-    # Looks like a JSON array/scalar: decode it when possible.
-    if stripped.startswith("[") or stripped.startswith('"'):
-        try:
-            decoded = json.loads(stripped)
-            return decoded if isinstance(decoded, list) else [decoded]
-        except json.JSONDecodeError:
-            # Fall through to the separator-based split.
-            stripped = stripped.strip("[]")
-
-    # Split on the usual separators; a plain value yields a single item.
-    return [part.strip().strip("\"'") for part in re.split(r"[,;|]", stripped) if part.strip()]
-
-
-def _as_list(value: Any) -> list[Any] | None:
-    """Normalise a scalar, list or text argument coming from the model into a list.
-
-    Handles nested lists (``[[300]]``), JSON encoded arrays (``'["COL"]'``) and
-    separator-delimited strings (``'300, 100'``).
-
-    Args:
-        value: ``None``, a scalar, a list or a string.
-
-    Returns:
-        ``None`` when the value is empty, otherwise a flat list without blanks.
-    """
-    # Nothing given: keep the criterion out of the filter.
-    if value is None:
-        return None
-
-    # Strings may hide a serialised list; decode them before flattening.
-    if isinstance(value, str):
-        items: list[Any] = _parse_text_list(value)
-    elif isinstance(value, (list, tuple)):
-        items = _flatten(list(value))
-    else:
-        items = [value]
-
-    # Strings inside lists may themselves hide several values (e.g. ['["COL"]']
-    # or ['100, 500']); decode/split them too.
-    expanded: list[Any] = []
-    for item in items:
-        if isinstance(item, str) and (item.strip().startswith("[") or re.search(r"[,;|]", item)):
-            expanded.extend(_parse_text_list(item))
-        else:
-            expanded.append(item)
-
-    cleaned = [item for item in expanded if item is not None and str(item).strip() != ""]
-
-    return cleaned or None
-
-
-def _as_upper_list(value: Any) -> list[str] | None:
-    """Like :func:`_as_list` but upper-cases every item (ISO3 / WIEWS codes)."""
-    items = _as_list(value)
-    return None if items is None else [str(item).strip().upper() for item in items]
-
-
-def _as_int_list(value: Any, name: str = "samp_stat") -> list[int] | None:
-    """Like :func:`_as_list` but converts every item to ``int``.
-
-    Accepts integers, integral floats (``300.0``) and numeric strings (``"300"``).
-
-    Args:
-        value: Raw argument.
-        name: Argument name used in the error message.
-
-    Returns:
-        List of integer codes, or ``None`` when nothing was given.
-
-    Raises:
-        ValueError: If any item is not an integer code; the message names the
-            offending values so the model can explain them to the user.
-    """
-    items = _as_list(value)
-
-    if items is None:
-        return None
-
-    codes: list[int] = []
-    invalid: list[Any] = []
-
-    # Convert item by item, collecting the ones that are not integer codes.
-    for item in items:
-        try:
-            number = float(str(item).strip())
-        except ValueError:
-            invalid.append(item)
-            continue
-
-        if number != int(number):
-            invalid.append(item)
-            continue
-
-        codes.append(int(number))
-
-    if invalid:
-        raise ValueError(
-            f"'{name}' must contain MCPD integer codes such as 100, 300 or 500; "
-            f"received invalid values: {invalid}"
-        )
-
-    return codes
-
-
-def _as_bool(value: Any) -> bool | None:
-    """Interpret a boolean argument that may arrive as text.
-
-    Args:
-        value: ``None``, a bool or a string such as ``"true"``/``"false"``.
-
-    Returns:
-        The boolean, or ``None`` when empty or unrecognised.
-    """
-    if value is None or isinstance(value, bool):
-        return value
-
-    text = str(value).strip().lower()
-
-    # Only explicit truthy/falsy words are accepted; anything else is ignored.
-    if text in ("true", "yes", "1"):
-        return True
-    if text in ("false", "no", "0"):
-        return False
-
-    return None
-
-
-def _as_int(value: Any) -> int | None:
-    """Interpret an integer argument that may arrive as text.
-
-    Args:
-        value: ``None``, a number or a numeric string.
-
-    Returns:
-        The integer, or ``None`` when empty or not numeric.
-    """
-    if value is None or isinstance(value, bool):
-        return None
-
-    try:
-        return int(float(str(value).strip()))
-    except ValueError:
-        return None
 
 
 class ListAccessionsSkill(Skill):
@@ -400,8 +219,8 @@ class ListAccessionsSkill(Skill):
                 samp_stat=samp_stat,
                 accession_numbers=accession_numbers,
                 text=text or query,
-                historic=_as_bool(historic),
-                max_records=_as_int(max_records),
+                historic=as_bool(historic),
+                max_records=as_int(max_records),
             )
 
         return self.error(
@@ -551,18 +370,18 @@ class ListAccessionsSkill(Skill):
             ValueError: If ``samp_stat`` contains non-integer values.
         """
         return AccessionFilter(
-            crop=[str(item).strip().lower() for item in _as_list(crop)] if _as_list(crop) else None,
+            crop=[str(item).strip().lower() for item in as_list(crop)] if as_list(crop) else None,
             taxonomy=TaxonomyFilter(
-                genus=[str(item).strip().capitalize() for item in _as_list(genus)] if _as_list(genus) else None,
-                species=[str(item).strip().lower() for item in _as_list(species)] if _as_list(species) else None,
+                genus=[str(item).strip().capitalize() for item in as_list(genus)] if as_list(genus) else None,
+                species=[str(item).strip().lower() for item in as_list(species)] if as_list(species) else None,
             ),
-            country_of_origin=CountryFilter(code3=_as_upper_list(country_of_origin)),
-            institute=InstituteFilter(code=_as_upper_list(institute_code)),
-            samp_stat=_as_int_list(samp_stat),
-            accession_numbers=[str(item).strip() for item in _as_list(accession_numbers)]
-            if _as_list(accession_numbers)
+            country_of_origin=CountryFilter(code3=as_upper_list(country_of_origin)),
+            institute=InstituteFilter(code=as_upper_list(institute_code)),
+            samp_stat=as_int_list(samp_stat),
+            accession_numbers=[str(item).strip() for item in as_list(accession_numbers)]
+            if as_list(accession_numbers)
             else None,
-            text=" ".join(str(item) for item in _as_list(text)) if _as_list(text) else None,
+            text=" ".join(str(item) for item in as_list(text)) if as_list(text) else None,
             historic=historic,
         )
 
@@ -605,7 +424,7 @@ class ListAccessionsSkill(Skill):
         try:
             # Crop names typed by users ("bean", "frijol") are translated into the
             # real Genesys crop codes; unknown names are dropped and reported.
-            crop_names = [str(item) for item in (_as_list(crop) or [])]
+            crop_names = [str(item) for item in (as_list(crop) or [])]
             crop_codes: list[str] | None = None
 
             if crop_names:

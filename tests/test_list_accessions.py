@@ -188,7 +188,7 @@ def test_registry_discovers_both_skills() -> None:
     """Auto-discovery registers list_accessions and export_list."""
     registry = SkillRegistry().discover()
 
-    assert set(registry.names()) == {"list_accessions", "export_list"}
+    assert {"list_accessions", "export_list", "passport_filter"} <= set(registry.names())
     assert all(tool["type"] == "function" for tool in registry.tools())
 
 

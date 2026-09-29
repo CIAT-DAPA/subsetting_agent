@@ -66,6 +66,23 @@ block named "Attached files". Pass those exact paths to the tools that need them
 - If a list is already loaded and the user attaches a new file, loading it
   replaces the Original and Candidate lists; tell the user.
 
+## Filtering by passport data (tool: passport_filter)
+- The user wants a subset by country, institute, biological status, genus,
+  species, coordinates, elevation, dates or any other column -> passport_filter
+  with action="filter" and conditions [{{"column", "operator", "value"}}].
+  Operators: equals, not_equals, in, not_in, contains, not_contains,
+  starts_with, gt, gte, lt, lte, between, is_null, not_null.
+- Map words to values: countries to ISO3 (Colombia -> COL), "landraces" ->
+  SAMPSTAT 300, "wild" -> 100, "improved" -> 500, "georeferenced" ->
+  DECLATITUDE not_null. Column names can be MCPD codes or plain words
+  (country, latitude, institute); the tool resolves them.
+- When you do not know which values a column holds, call action="describe"
+  first (optionally with columns=[...]) and use the real values.
+- Filters chain across turns: each call narrows the current Candidate list.
+  "remove the filters / start over" -> action="reset".
+- If the tool reports 0 matches, the list is unchanged: explain it and offer
+  the frequent values it returned.
+
 ## Exporting lists (tool: export_list)
 - "final list", "current list", "filtered list", "download the result" ->
   export_list with which="candidate".

@@ -133,6 +133,29 @@ class SessionState:
             mode.value,
         )
 
+    def reset_candidate_list(self) -> None:
+        """Rebuild the Candidate list from the Original list.
+
+        All previous filters and annotations are discarded; the seven extra
+        columns come back empty.
+
+        Raises:
+            ValueError: If no Original list is loaded.
+        """
+        # Nothing to reset before the first load.
+        if self.original_list is None:
+            raise ValueError("There is no Original list to reset from.")
+
+        candidate = self.original_list.copy(deep=True)
+
+        # Recreate the annotation columns exactly like ``set_original_list`` does.
+        for column in CANDIDATE_EXTRA_COLUMNS:
+            if column not in candidate.columns:
+                candidate[column] = pd.NA
+
+        self.candidate_list = candidate.reset_index(drop=True)
+        logger.info("Session %s: candidate list reset (%s rows)", self.session_id, len(candidate))
+
     def update_candidate_list(self, dataframe: pd.DataFrame) -> None:
         """Replace the Candidate list with a new (filtered or annotated) version.
 
