@@ -51,8 +51,12 @@ class Settings(BaseSettings):
         app_port: Port where the Gradio application listens.
         tmp_dir: Root folder for per-session temporary files.
         genesys_api_url: Base URL of the Genesys PGR API.
-        genesys_client_id: OAuth client id for Genesys (optional).
-        genesys_client_secret: OAuth client secret for Genesys (optional).
+        genesys_api_token: Personal API token (``Authorization: API-Token``); preferred.
+        genesys_client_id: OAuth client id for Genesys (used when no token is set).
+        genesys_client_secret: OAuth client secret for Genesys (used when no token is set).
+        genesys_page_size: Records requested per page (max 1000).
+        genesys_max_records: Safety cap on records fetched in one search.
+        genesys_timeout: HTTP timeout in seconds for Genesys requests.
         subsetting_api_url: Base URL of the Subsetting (climate) API.
         openalex_api_url: Base URL of the OpenAlex API.
         openalex_mailto: Contact email for the OpenAlex polite pool (optional).
@@ -86,8 +90,12 @@ class Settings(BaseSettings):
 
     # --- External APIs -------------------------------------------------------
     genesys_api_url: str = "https://api.genesys-pgr.org"
+    genesys_api_token: str | None = None
     genesys_client_id: str | None = None
     genesys_client_secret: str | None = None
+    genesys_page_size: int = 500
+    genesys_max_records: int = 5000
+    genesys_timeout: float = 60.0
     subsetting_api_url: str | None = None
     openalex_api_url: str = "https://api.openalex.org"
     openalex_mailto: str | None = None

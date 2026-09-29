@@ -24,7 +24,10 @@ core/
   state.py              SessionState: Original list, Candidate list, mode, log
   formatter.py          Activity summary + 15-row preview + CSV exports
   logger.py             Logging setup
-sdks/                   (next steps) Genesys, Subsetting and OpenAlex clients
+sdks/
+  genesys/              Genesys PGR client (POST /api/v2/acn/list, AccessionFilter) - see sdks/genesys/README.md
+scripts/
+  genesys_smoke.py      Manual check of the Genesys SDK against the real API
 tests/                  pytest suite
 ```
 
