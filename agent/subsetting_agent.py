@@ -7,6 +7,7 @@ turn of the same session.
 """
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,22 @@ from core.session import SessionManager
 from core.state import SessionState, SessionStore
 
 logger = get_logger(__name__)
+
+# Key of a tool result whose value lists files generated for the user.
+OUTPUT_FILES_KEY = "output_files"
+
+
+@dataclass
+class AgentResponse:
+    """Answer of one agent turn.
+
+    Attributes:
+        text: Markdown answer (agent text + activity summary + preview).
+        files: Files generated during the turn that must be attached to the chat.
+    """
+
+    text: str
+    files: list[Path] = field(default_factory=list)
 
 
 class _RescuedFunction:
@@ -102,7 +119,7 @@ class SubsettingAgent:
         user_message: str,
         history: list[dict[str, str]],
         uploaded_files: list[Path] | None = None,
-    ) -> str:
+    ) -> AgentResponse:
         """Process one user turn and return the formatted answer.
 
         Args:
@@ -113,7 +130,8 @@ class SubsettingAgent:
                 the session ``inputs`` folder.
 
         Returns:
-            Markdown answer including the activity summary and the preview.
+            ``AgentResponse`` with the markdown answer (including the activity
+            summary and the preview) and the files generated during the turn.
         """
         state = self.session_store.get_or_create(session_id)
         paths = self.session_manager.get_paths(session_id)
@@ -127,7 +145,7 @@ class SubsettingAgent:
 
         # An empty message with no files gives the model nothing to work with.
         if not message_text.strip():
-            return "Please write a message or attach a file so I can help you."
+            return AgentResponse(text="Please write a message or attach a file so I can help you.")
 
         memory: list[dict[str, Any]] = [
             *history[-self.settings.agent_max_history_messages :],
@@ -139,11 +157,20 @@ class SubsettingAgent:
             session_context=state.summary_context(),
         )
 
+        generated_files: list[Path] = []
+
         agent_text = await self._run_agent_loop(
-            state=state, paths=paths, memory=memory, system_prompt=system_prompt
+            state=state,
+            paths=paths,
+            memory=memory,
+            system_prompt=system_prompt,
+            generated_files=generated_files,
         )
 
-        return self.formatter.build_response(agent_text, state)
+        return AgentResponse(
+            text=self.formatter.build_response(agent_text, state),
+            files=generated_files,
+        )
 
     # --------------------------------------------------------------- helpers
     @staticmethod
@@ -195,6 +222,7 @@ class SubsettingAgent:
         paths,
         memory: list[dict[str, Any]],
         system_prompt: dict[str, str],
+        generated_files: list[Path] | None = None,
     ) -> str:
         """Alternate model calls and skill executions until a final answer.
 
@@ -203,10 +231,13 @@ class SubsettingAgent:
             paths: Folders of the current session.
             memory: Conversation messages (history + current user message).
             system_prompt: System message built for this turn.
+            generated_files: Mutable list where files produced by skills
+                (``output_files`` key of their results) are collected.
 
         Returns:
             The final natural-language answer of the model.
         """
+        generated_files = generated_files if generated_files is not None else []
         tools = self.registry.tools()
         executed_calls: dict[str, dict[str, Any]] = {}  # call key -> cached result
         stalled_iterations = 0  # consecutive iterations without a new tool call
@@ -284,6 +315,7 @@ class SubsettingAgent:
                     result = self._execute_skill(state, paths, tool_name, tool_arguments)
                     executed_calls[call_key] = result
                     made_progress = True
+                    self._collect_output_files(result, generated_files)
 
                 memory.append(
                     {
@@ -357,6 +389,27 @@ class SubsettingAgent:
         except Exception as exc:  # noqa: BLE001 - any skill failure must reach the model
             logger.exception("Skill %s failed", tool_name)
             return {"status": "error", "message": f"Error executing '{tool_name}': {exc}"}
+
+    @staticmethod
+    def _collect_output_files(result: dict[str, Any], generated_files: list[Path]) -> None:
+        """Append the files listed in a tool result to the turn's file list.
+
+        Args:
+            result: Tool result returned by a skill.
+            generated_files: Accumulator of files to attach to the answer.
+        """
+        paths = result.get(OUTPUT_FILES_KEY) if isinstance(result, dict) else None
+
+        # Skills that generate nothing simply omit the key.
+        if not isinstance(paths, list):
+            return
+
+        # Keep only existing files and avoid attaching the same file twice.
+        for raw_path in paths:
+            path = Path(str(raw_path))
+
+            if path.is_file() and path not in generated_files:
+                generated_files.append(path)
 
     # ---------------------------------------------------------- static utils
     @staticmethod

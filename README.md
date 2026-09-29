@@ -16,6 +16,8 @@ agent/
 skills/
   base.py               Skill contract (name, description, parameters, run)
   <skill_name>/         One folder per skill: SKILL.md + skill.py
+  list_accessions/      Load the first list (local Excel/CSV; Genesys mode pending)
+  export_list/          Export Candidate or Original list as CSV (attached to the chat)
 core/
   config.py             Settings loaded from .env (pydantic-settings)
   session.py            tmp/<session>/inputs|outputs folders

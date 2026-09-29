@@ -121,7 +121,30 @@ def store_uploaded_files(session_id: str, files: list[Any]) -> list[Path]:
     return stored
 
 
-async def chat(message: Any, history: list[dict[str, Any]], request: gr.Request) -> str:
+def build_chat_messages(text: str, files: list[Path]) -> list[dict[str, Any]]:
+    """Convert an agent answer into the OpenAI-style messages Gradio renders.
+
+    Args:
+        text: Markdown answer of the agent.
+        files: Files generated during the turn to attach for download.
+
+    Returns:
+        One assistant message with the text followed by one per attached file.
+    """
+    messages: list[dict[str, Any]] = [{"role": "assistant", "content": text}]
+
+    # Each generated file becomes its own downloadable message bubble.
+    for file_path in files:
+        messages.append(
+            {"role": "assistant", "content": {"path": str(file_path), "alt_text": file_path.name}}
+        )
+
+    return messages
+
+
+async def chat(
+    message: Any, history: list[dict[str, Any]], request: gr.Request
+) -> list[dict[str, Any]]:
     """Gradio callback executed for every user message.
 
     Args:
@@ -130,7 +153,7 @@ async def chat(message: Any, history: list[dict[str, Any]], request: gr.Request)
         request: Gradio request, used to obtain the ``session_hash``.
 
     Returns:
-        The agent answer in markdown.
+        Assistant messages: the markdown answer plus one message per attached file.
     """
     # Multimodal ChatInterface sends a dict; be tolerant to the plain-string form.
     if isinstance(message, dict):
@@ -145,12 +168,14 @@ async def chat(message: Any, history: list[dict[str, Any]], request: gr.Request)
     uploaded = store_uploaded_files(session_id, files)
     memory = build_memory_from_history(history)
 
-    return await agent.chat(
+    response = await agent.chat(
         session_id=session_id,
         user_message=text,
         history=memory,
         uploaded_files=uploaded,
     )
+
+    return build_chat_messages(response.text, response.files)
 
 
 app = gr.ChatInterface(
@@ -167,4 +192,9 @@ app = gr.ChatInterface(
 
 # Only launch the server when the module is executed directly (``uv run app.py``).
 if __name__ == "__main__":
-    app.launch(server_name=settings.app_host, server_port=settings.app_port)
+    # ``allowed_paths`` lets Gradio serve the CSV files written under the tmp folder.
+    app.launch(
+        server_name=settings.app_host,
+        server_port=settings.app_port,
+        allowed_paths=[str(settings.tmp_dir.resolve())],
+    )

@@ -110,10 +110,15 @@ def test_formatter_builds_preview_and_exports(
     assert len(pd.read_csv(original_csv).columns) == 4
 
 
-def test_registry_discovers_without_skills() -> None:
-    """With no concrete skills the registry is empty but usable."""
-    registry = SkillRegistry().discover()
+def test_registry_is_usable_before_discovery() -> None:
+    """A registry without skills is empty but usable; discovery fills it."""
+    registry = SkillRegistry()
 
     assert len(registry) == 0
     assert registry.tools() == []
     assert "no tools" in registry.describe()
+
+    registry.discover()
+
+    assert len(registry) > 0
+    assert "no tools" not in registry.describe()
