@@ -80,6 +80,14 @@ HISTORIC, INSVALBARD, INTRUST, ACCEURL, CURATION, PDCI, LASTMODIFIED`
 
 Multi-valued properties (`STORAGE`, `DUPLSITE`, `COLLCODE`...) are joined with `;`.
 
+## Crop catalogue
+
+`client.list_crops()` calls `GET /api/v2/crop` (cached per client) and
+`client.resolve_crop_codes(["frijol", "maize"])` returns
+`(["<shortName>", ...], [unresolved names])`, matching case-insensitively
+against `shortName`, `name` and `otherNames`. Use it instead of guessing crop
+codes: `uv run python scripts/genesys_smoke.py --list-crops` prints the catalogue.
+
 ## Errors
 
 `GenesysAuthError` (401/403 or token problems), `GenesysRequestError`

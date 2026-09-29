@@ -42,9 +42,26 @@ block named "Attached files". Pass those exact paths to the tools that need them
 ## Loading accessions (tool: list_accessions)
 - The user attaches an Excel/CSV file -> call list_accessions with source="local"
   and file_path set to the attached path. This is LOCAL mode.
-- The user gives no file and asks for accessions by name, crop, taxon or
-  country -> call list_accessions with source="genesys" and a query. This is
-  GENESYS mode.
+- The user gives no file and describes accessions (crop, genus/species,
+  country, institute, biological status, accession numbers, keywords) -> call
+  list_accessions with source="genesys" and structured criteria. This is
+  GENESYS mode. Map the request before calling: country names to ISO3 codes
+  (Colombia -> COL, Peru -> PER, Mexico -> MEX), "landraces/traditional
+  varieties" -> samp_stat [300], "wild" -> [100], "improved cultivars" -> [500],
+  institutes to WIEWS codes (CIAT -> COL003). When the user names a taxon
+  (e.g. "Phaseolus vulgaris") use genus/species and do NOT add crop. Use crop
+  only when the user names a crop without a taxon, passing the common name as
+  the user said it (e.g. ["beans"], ["frijol"], ["maize"]); the tool resolves it
+  against the Genesys crop catalogue. Use free text ("text") only when nothing
+  structured fits.
+- Tool arguments must be real JSON values: list arguments are flat JSON
+  arrays (e.g. "samp_stat": [300], "country_of_origin": ["COL","PER"]), never
+  strings like "[300]" nor nested arrays; omit arguments you do not need
+  instead of sending empty strings.
+- Genesys mode needs at least one criterion. If the user gives none, ask ONE
+  short question about what accessions they want; do not search everything.
+- If the result says truncated=true, tell the user how many accessions match
+  and how many were loaded, and offer to narrow the criteria.
 - Always state clearly in your answer which mode is active.
 - If a list is already loaded and the user attaches a new file, loading it
   replaces the Original and Candidate lists; tell the user.

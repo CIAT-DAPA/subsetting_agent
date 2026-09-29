@@ -462,3 +462,58 @@ class AccessionPage(BaseModel):
         records = [AccessionRecord(raw=item) for item in payload.get("content", []) or []]
         data = {key: value for key, value in payload.items() if key != "content"}
         return cls(content=records, **data)
+
+
+# ----------------------------------------------------------------- crops
+class Crop(BaseModel):
+    """A crop of the Genesys catalogue (``CropDTO``).
+
+    Attributes:
+        short_name: Code used in ``AccessionFilter.crop`` (``shortName``).
+        name: Display name.
+        other_names: Alternative names in several languages.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    short_name: str = Field(alias="shortName")
+    name: str | None = None
+    other_names: list[str] = Field(default_factory=list, alias="otherNames")
+
+    @classmethod
+    def from_api(cls, item: dict[str, Any]) -> Crop:
+        """Build a crop from the API payload.
+
+        Args:
+            item: ``CropDTO`` dictionary.
+
+        Returns:
+            The parsed crop. ``otherNames`` may arrive as a list or as a
+            comma-separated string; both are normalised to a list.
+        """
+        other = item.get("otherNames") or []
+
+        # Some Genesys versions serialise otherNames as one string.
+        if isinstance(other, str):
+            other = [part.strip() for part in other.split(",") if part.strip()]
+
+        return cls(shortName=str(item.get("shortName", "")), name=item.get("name"), otherNames=list(other))
+
+    def matches(self, text: str) -> bool:
+        """Whether a user-provided name refers to this crop.
+
+        Args:
+            text: Crop name or code typed by the user.
+
+        Returns:
+            ``True`` if ``text`` equals the code, the name or any other name
+            (case-insensitive, ignoring surrounding spaces).
+        """
+        needle = text.strip().lower()
+
+        # An empty string never matches anything.
+        if not needle:
+            return False
+
+        candidates = [self.short_name, self.name or "", *self.other_names]
+        return any(candidate.strip().lower() == needle for candidate in candidates)

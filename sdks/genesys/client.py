@@ -29,7 +29,7 @@ from sdks.genesys.errors import (
     GenesysError,
     GenesysRequestError,
 )
-from sdks.genesys.models import AccessionFilter, AccessionPage, AccessionRecord
+from sdks.genesys.models import AccessionFilter, AccessionPage, AccessionRecord, Crop
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type hints only
     from core.config import Settings
@@ -38,6 +38,8 @@ logger = get_logger(__name__)
 
 # Path of the accession listing endpoint, relative to the base URL.
 LIST_ACCESSIONS_PATH = "/api/v2/acn/list"
+# Path of the crop catalogue endpoint.
+CROPS_PATH = "/api/v2/crop"
 # Path of the OAuth2 token endpoint, relative to the base URL.
 TOKEN_PATH = "/oauth/token"
 # Hard limit imposed by Genesys on the page size of JSON listings.
@@ -76,6 +78,7 @@ class GenesysClient:
         self.page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
         self.max_records = max(max_records, 1)
         self.max_retries = max(max_retries, 1)
+        self._crops: list[Crop] | None = None
         self._http = httpx.Client(
             base_url=self.base_url,
             timeout=timeout,
@@ -204,9 +207,14 @@ class GenesysClient:
         yielded = 0
         page_number = 0
 
+        # Never ask for more records than the cap allows (a cap of 20 with a page
+        # size of 500 would download 480 useless records). The size stays fixed
+        # for the whole iteration so page numbers remain consistent offsets.
+        page_size = min(size or self.page_size, MAX_PAGE_SIZE, limit)
+
         # Request pages until the server says it is the last one or the cap is hit.
         while True:
-            page = self.list_accessions(accession_filter, page=page_number, size=size)
+            page = self.list_accessions(accession_filter, page=page_number, size=page_size)
 
             for record in page.content:
                 # Respect the safety cap even in the middle of a page.
@@ -267,6 +275,53 @@ class GenesysClient:
 
         return pd.DataFrame(rows, columns=list(MCPD_FIELD_MAP))
 
+    # --------------------------------------------------------------- crops
+    def list_crops(self, *, refresh: bool = False) -> list[Crop]:
+        """Return the crops known by Genesys (``GET /api/v2/crop``), cached.
+
+        Args:
+            refresh: ``True`` to ignore the cache and call the API again.
+
+        Returns:
+            List of ``Crop`` objects.
+        """
+        # Crops rarely change; one call per client lifetime is enough.
+        if self._crops is None or refresh:
+            payload = self._get_json(CROPS_PATH)
+            items = payload if isinstance(payload, list) else payload.get("content", [])
+            self._crops = [Crop.from_api(item) for item in items if isinstance(item, dict)]
+            logger.info("Loaded %s crops from Genesys", len(self._crops))
+
+        return self._crops
+
+    def resolve_crop_codes(self, names: list[str]) -> tuple[list[str], list[str]]:
+        """Translate crop names given by a user into Genesys crop codes.
+
+        Each name is compared (case-insensitively) with the ``shortName``,
+        ``name`` and ``otherNames`` of every crop.
+
+        Args:
+            names: Crop names or codes, e.g. ``["bean", "frijol", "maize"]``.
+
+        Returns:
+            ``(resolved_codes, unresolved_names)`` preserving order and without
+            duplicates.
+        """
+        crops = self.list_crops()
+        resolved: list[str] = []
+        unresolved: list[str] = []
+
+        # Try every name against the whole crop catalogue.
+        for name in names:
+            code = next((crop.short_name for crop in crops if crop.matches(name)), None)
+
+            if code is None:
+                unresolved.append(name)
+            elif code not in resolved:
+                resolved.append(code)
+
+        return resolved, unresolved
+
     # ------------------------------------------------------------- internals
     def _post_json(self, path: str, *, params: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
         """POST a JSON body and decode the JSON answer, with retries.
@@ -275,6 +330,39 @@ class GenesysClient:
             path: Endpoint path relative to the base URL.
             params: Query string parameters.
             body: JSON body.
+
+        Returns:
+            Decoded JSON payload.
+        """
+        return self._request_json("POST", path, params=params, body=body)
+
+    def _get_json(self, path: str, *, params: dict[str, Any] | None = None) -> Any:
+        """GET an endpoint and decode the JSON answer, with retries.
+
+        Args:
+            path: Endpoint path relative to the base URL.
+            params: Query string parameters.
+
+        Returns:
+            Decoded JSON payload (object or array).
+        """
+        return self._request_json("GET", path, params=params or {}, body=None)
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any],
+        body: dict[str, Any] | None,
+    ) -> Any:
+        """Send a request and decode the JSON answer, with retries.
+
+        Args:
+            method: HTTP method (``GET`` or ``POST``).
+            path: Endpoint path relative to the base URL.
+            params: Query string parameters.
+            body: JSON body for POST requests; ``None`` for GET.
 
         Returns:
             Decoded JSON payload.
@@ -289,8 +377,12 @@ class GenesysClient:
         # Retry loop for transient failures; permanent errors break out immediately.
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = self._http.post(
-                    path, params=params, json=body, headers=self.auth.headers(self._http)
+                response = self._http.request(
+                    method,
+                    path,
+                    params=params,
+                    json=body,
+                    headers=self.auth.headers(self._http),
                 )
             except httpx.HTTPError as exc:
                 last_error = GenesysConnectionError(f"Could not reach Genesys ({path}): {exc}")

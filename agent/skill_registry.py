@@ -65,8 +65,14 @@ class SkillRegistry:
         """
         # Inspect every class of the module and keep the concrete skills only.
         for _, candidate in inspect.getmembers(module, inspect.isclass):
-            is_skill = issubclass(candidate, Skill) and candidate is not Skill
-            is_local = candidate.__module__ == module.__name__
+            # Typing aliases (e.g. ``Callable[[], X]``) pass ``isclass`` (and even
+            # ``isinstance(..., type)`` in Python 3.10) but ``issubclass`` raises on them.
+            try:
+                is_skill = issubclass(candidate, Skill) and candidate is not Skill
+            except TypeError:
+                continue
+
+            is_local = getattr(candidate, "__module__", None) == module.__name__
 
             # Ignore ``Skill`` itself, abstract helpers and re-exported classes.
             if not (is_skill and is_local) or inspect.isabstract(candidate):

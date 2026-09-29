@@ -13,8 +13,8 @@ lists defined by the business rules:
 | Situation | Arguments |
 |-----------|-----------|
 | The user attached an Excel/CSV file (its path appears in the *Attached files* block) | `source="local"`, `file_path=<attached path>`, optional `sheet_name` |
-| The user gives no file and asks for accessions by name, crop, taxon, country... | `source="genesys"`, `query=<search text>` |
-| The user attaches a new file after a list is already loaded | Call it again with the new file: the previous lists are **replaced** and the activity log says so |
+| The user gives no file and describes accessions (crop, genus/species, country, institute, biological status, accession numbers, keywords) | `source="genesys"` + the matching criteria (at least one) |
+| The user attaches a new file or asks for a new Genesys search after a list is already loaded | Call it again: the previous lists are **replaced** and the activity log says so |
 
 Do **not** call it for greetings, questions about capabilities or when the user
 only wants to filter a list that is already loaded.
@@ -30,25 +30,68 @@ only wants to filter a list that is already loaded.
 
 ## Genesys mode
 
-Not implemented yet: the tool returns a formal error asking the user to upload a
-file. The interface (`source="genesys"`, `query`) is final and will be backed by
-the Genesys SDK.
+Criteria are translated into a Genesys `AccessionFilter`; only the criteria with
+a value are sent. Passport data are the MCPD columns returned by the SDK
+(`INSTCODE, ACCENUMB, GENUS, SPECIES, ORIGCTY, SAMPSTAT, DECLATITUDE,
+DECLONGITUDE, ...`).
+
+| Argument | Type | Maps to | Example |
+|----------|------|---------|---------|
+| `crop` | list[str] | `crop` – common names resolved against the Genesys crop catalogue (`GET /api/v2/crop`); unknown names are ignored and reported in `unresolved_crops` | `["beans"]`, `["frijol"]`, `["maize"]` |
+| `genus` | list[str] | `taxonomy.genus` | `["Phaseolus"]` |
+| `species` | list[str] | `taxonomy.species` | `["vulgaris"]` |
+| `country_of_origin` | list[str] | `countryOfOrigin.code3` (ISO3) | `["COL", "PER"]` |
+| `institute_code` | list[str] | `institute.code` (FAO WIEWS) | `["COL003"]` (CIAT), `["USA022"]` |
+| `samp_stat` | list[int] | `sampStat` (MCPD) | `[300]` |
+| `accession_numbers` | list[str] | `accessionNumbers` | `["G50001", "G50002"]` |
+| `text` | str | `_text` full-text search | `"drought tolerant"` |
+| `historic` | bool | `historic` | omit unless the user asks for historical records |
+| `max_records` | int | download cap | defaults to `GENESYS_MAX_RECORDS` |
+
+MCPD `SAMPSTAT` codes: 100 wild, 110 natural, 120 semi-natural/wild, 200 weedy,
+300 traditional cultivar / landrace, 400 breeding/research material,
+410 breeder's line, 500 advanced/improved cultivar, 600 GMO, 999 other.
+
+Mapping hints for the model:
+
+* A taxon in the request ("Phaseolus vulgaris") → `genus`/`species`, **no** `crop`.
+* A crop without taxon ("frijoles", "beans", "maíz") → `crop=["frijoles"]` as said by the user
+  (or `genus=["Phaseolus"]`, `["Zea"]`, `["Oryza"]`, `["Manihot"]` when the genus is obvious).
+* When `crop` + taxonomy return 0 accessions, the tool retries with the taxonomy only and
+  explains it in `notes`.
+* Country names → ISO3 (`Colombia`→`COL`, `Perú`→`PER`, `México`→`MEX`, `Brasil`→`BRA`, `Guatemala`→`GTM`).
+* "landraces / variedades tradicionales / criollas" → `samp_stat=[300]`; "silvestres / wild" → `samp_stat=[100]`;
+  "cultivares mejorados / improved" → `samp_stat=[500]`.
+* "del CIAT" → `institute_code=["COL003"]`; "del CIMMYT" → `["MEX002"]`; "del IRRI" → `["PHL001"]`.
+
+The tool first counts the matching accessions, then downloads up to the cap.
+When more accessions match than were downloaded, the result has
+`truncated=true` and the message says how many match versus how many were
+loaded: tell the user and offer to narrow the criteria.
 
 ## Result
 
 ```json
 {
   "status": "ok",
-  "message": "Loaded 120 accessions from file 'beans.xlsx' (local mode). All 14 columns are treated as passport data.",
-  "mode": "local",
-  "accessions": 120,
-  "columns": ["ACCENUMB", "ORIGCTY", "DECLATITUDE", "DECLONGITUDE", "..."],
-  "total_columns": 14,
+  "message": "Loaded 5000 accessions from Genesys PGR (genesys mode) matching {...}; 5649 accessions match but only the first 5000 were loaded. Passport data columns follow the MCPD standard.",
+  "mode": "genesys",
+  "accessions": 5000,
+  "total_matching": 5649,
+  "truncated": true,
+  "filter": {"taxonomy": {"genus": ["Phaseolus"], "species": ["vulgaris"]}, "countryOfOrigin": {"code3": ["COL"]}},
+  "columns": ["INSTCODE", "ACCENUMB", "GENUS", "SPECIES", "ORIGCTY", "..."],
+  "total_columns": 49,
   "coordinate_columns": {"latitude": "DECLATITUDE", "longitude": "DECLONGITUDE"},
+  "notes": [],
+  "unresolved_crops": [],
   "replaced_previous_lists": false
 }
 ```
 
+Local mode returns the same shape with `"mode": "local"` and without
+`total_matching`/`truncated`/`filter`.
+
 On failure `status` is `"error"` and `message` explains what the user should do
-(upload a file, choose an existing sheet, use a supported format...). Relay that
+(upload a file, add a criterion, relax the filters, retry later...). Relay that
 guidance to the user in their language; never invent data.

@@ -316,3 +316,46 @@ def test_record_flatten_handles_missing_nested() -> None:
     assert flat["ACCENUMB"] == "X"
     assert flat["GENUS"] is None
     assert flat["DECLATITUDE"] is None
+
+
+def test_iter_accessions_shrinks_page_to_cap() -> None:
+    """A small cap never requests a page larger than the cap."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        size = int(request.url.params["l"])
+        return httpx.Response(200, json=_page([_dto(f"G{i}") for i in range(size)], 0, 5000, size))
+
+    client, recorder = _client(handler, page_size=500)
+    records = list(client.iter_accessions(max_records=20))
+
+    assert len(records) == 20
+    assert [int(r.url.params["l"]) for r in recorder.requests] == [20]
+
+
+def test_list_crops_and_resolve_codes() -> None:
+    """Crop names resolve through shortName/name/otherNames, cached after one GET."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        assert request.method == "GET" and request.url.path == "/api/v2/crop"
+        assert request.headers["Authorization"] == "API-Token secret-token"
+        return httpx.Response(
+            200,
+            json=[
+                {"shortName": "beans", "name": "Beans", "otherNames": ["bean", "frijol"]},
+                {"shortName": "maize", "name": "Maize", "otherNames": "corn, maíz"},
+            ],
+        )
+
+    client, _ = _client(handler)
+    crops = client.list_crops()
+
+    assert [c.short_name for c in crops] == ["beans", "maize"]
+    assert crops[1].other_names == ["corn", "maíz"]
+
+    resolved, unresolved = client.resolve_crop_codes(["Frijol", "MAIZE", "corn", "papaya", ""])
+
+    assert resolved == ["beans", "maize"]
+    assert unresolved == ["papaya", ""]
+    assert calls["n"] == 1

@@ -16,7 +16,7 @@ agent/
 skills/
   base.py               Skill contract (name, description, parameters, run)
   <skill_name>/         One folder per skill: SKILL.md + skill.py
-  list_accessions/      Load the first list (local Excel/CSV; Genesys mode pending)
+  list_accessions/      Load the first list (local Excel/CSV, or Genesys PGR with structured criteria)
   export_list/          Export Candidate or Original list as CSV (attached to the chat)
 core/
   config.py             Settings loaded from .env (pydantic-settings)
@@ -56,6 +56,8 @@ Open `http://localhost:7860` (or the host/port set in `.env`).
 
 ```bash
 uv run --group dev pytest
+# Text genesys api
+uv run python scripts/genesys_smoke.py --genus Phaseolus --species vulgaris --country COL --limit 20
 ```
 
 ## Business rules in short

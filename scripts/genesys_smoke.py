@@ -5,6 +5,7 @@ It is NOT part of the pytest suite. Run it from the project root once the
 
     uv run python scripts/genesys_smoke.py
     uv run python scripts/genesys_smoke.py --genus Phaseolus --species vulgaris --country COL --limit 20
+    uv run python scripts/genesys_smoke.py --list-crops
 
 The script prints the request body that is sent, the total number of matching
 accessions and a preview of the flattened MCPD table.
@@ -39,13 +40,16 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments.
     """
     parser = argparse.ArgumentParser(description="Smoke test for the Genesys SDK.")
-    parser.add_argument("--crop", nargs="*", default=None, help="Genesys crop codes, e.g. bean")
+    parser.add_argument("--crop", nargs="*", default=None, help="Crop names or codes, resolved against the Genesys catalogue")
     parser.add_argument("--genus", nargs="*", default=["Phaseolus"], help="Genera")
     parser.add_argument("--species", nargs="*", default=None, help="Specific epithets")
     parser.add_argument("--country", nargs="*", default=None, help="ISO3 country of origin codes")
     parser.add_argument("--institute", nargs="*", default=None, help="FAO WIEWS institute codes")
     parser.add_argument("--text", default=None, help="Full-text keywords")
     parser.add_argument("--limit", type=int, default=10, help="Maximum records to download")
+    parser.add_argument(
+        "--list-crops", action="store_true", help="Print the Genesys crop catalogue and exit"
+    )
     return parser.parse_args()
 
 
@@ -77,6 +81,21 @@ def main() -> int:
     settings = get_settings()
     setup_logging(settings.log_level)
     args = parse_args()
+
+    # Catalogue mode: show the real crop codes so filters can be written correctly.
+    if args.list_crops:
+        try:
+            with GenesysClient.from_settings(settings) as client:
+                crops = client.list_crops()
+        except GenesysError as exc:
+            print(f"Genesys error: {exc}")
+            return 1
+
+        print(f"{len(crops)} crops in Genesys (shortName | name | otherNames):")
+        for crop in sorted(crops, key=lambda item: item.short_name):
+            print(f"  {crop.short_name} | {crop.name} | {', '.join(crop.other_names)}")
+        return 0
+
     accession_filter = build_filter(args)
 
     print("Base URL :", settings.genesys_api_url)
