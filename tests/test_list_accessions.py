@@ -510,8 +510,9 @@ def test_cellid_is_computed_at_load_and_reported(session) -> None:
 
     cellids = state.candidate_list["cellid"]
     assert cellids.notna().all()
-    # Palmira (3.42, -76.52): row floor((50-3.42)/0.05)=931, col floor((180-76.52)/0.05)=2069
-    assert int(cellids.iloc[0]) == 931 * 7198 + 2069 + 1
+    # Palmira (3.42, -76.52) on the global grid: row floor((90-3.42)/0.05)=1731,
+    # col floor((180-76.52)/0.05)=2069
+    assert int(cellids.iloc[0]) == 1731 * 7200 + 2069 + 1
     assert result["without_cellid"] == 0
     assert state.extras["coordinate_columns"] == {"latitude": "DECLATITUDE", "longitude": "DECLONGITUDE"}
     assert "Computed cellid for 5 of 5" in state.activity_log[-1].description

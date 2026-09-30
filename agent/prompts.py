@@ -87,6 +87,28 @@ block named "Attached files". Pass those exact paths to the tools that need them
 - If the tool reports 0 matches, the list is unchanged: explain it and offer
   the frequent values it returned.
 
+## Climate indicators (tool: climate_analysis)
+- The user mentions climate, drought, heat, rainfall, temperature, flooding,
+  photoperiod, soil (pH, texture, salinity) or wants groups of accessions by
+  environment -> climate_analysis. It needs the 'cellid' computed at load time.
+- Step 1, identify indicators: if the user names them (CDD, t_rain, TX,
+  days_heat...) use them; if the user describes a need ("drought tolerance",
+  "heat stress", "acid soils"), call action="list_indicators" with a query
+  ("drought", "heat", "soil"), choose the relevant prefixes and pass them in
+  "indicators" so they are remembered. Explain briefly to the user which
+  indicators you chose and why.
+- Step 2a, filter: action="filter" with conditions
+  [{{"indicator", "operator", "value", "statistic"?, "months"?}}]. Monthly
+  indicators are aggregated (sum by default for CDD/t_rain/days counts, mean
+  for temperatures); soil indicators use their single value.
+- Step 2b, cluster: action="cluster" with the indicators (or the remembered
+  ones). It never removes accessions; it fills cluster_climate (2-10 groups).
+  Describe the clusters to the user with the returned summary (per cluster:
+  mean/min/max of each indicator).
+- Crop-specific indicators (days_heat, days_cold, days_optm) need a crop; the
+  tool infers it from the list or asks. Report accessions without cellid or
+  without climate data (they are excluded/unassigned).
+
 ## Exporting lists (tool: export_list)
 - "final list", "current list", "filtered list", "download the result" ->
   export_list with which="candidate".

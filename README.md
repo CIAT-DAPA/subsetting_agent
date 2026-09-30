@@ -18,6 +18,7 @@ skills/
   <skill_name>/         One folder per skill: SKILL.md + skill.py
   list_accessions/      Load the first list (local Excel/CSV, or Genesys PGR with structured criteria)
   passport_filter/      Filter / describe / reset the Candidate list by passport columns
+  climate_analysis/     list_indicators / filter / cluster by climate indicators (Subsetting API)
   export_list/          Export Candidate or Original list as CSV (attached to the chat)
   arguments.py          Tolerant parsing of tool arguments (lists, ints, bools, JSON text)
 core/

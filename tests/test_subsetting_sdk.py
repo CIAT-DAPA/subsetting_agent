@@ -118,28 +118,39 @@ def _client(handler=default_handler, **kwargs) -> tuple[SubsettingClient, Record
 
 # -------------------------------------------------------------------- grid
 def test_compute_cellid_matches_raster_convention() -> None:
-    """Cell ids follow raster::cellFromXY: 1-based, row 1 at the northern edge."""
+    """Cell ids follow raster::cellFromXY on the global grid: 1-based, row 1 at 90N."""
+    grid = GridSettings()  # defaults = global 7200 x 3600, 0.05 degrees
+
+    # North-west corner cell and its eastern neighbour.
+    assert compute_cellid(89.99, -179.99, grid) == 1
+    assert compute_cellid(89.99, -179.94, grid) == 2
+    # First cell of the second row.
+    assert compute_cellid(89.94, -179.99, grid) == 7201
+    # Last cell of the grid (south-east corner).
+    assert compute_cellid(-89.99, 179.99, grid) == 7200 * 3600
+
+    # Real accessions verified against the Subsetting API (probe + indicators-data).
+    assert compute_cellid(11.39, -72.22, grid) == 11320556
+    assert compute_cellid(7.39, -72.65, grid) == 11896547
+    assert compute_cellid(5.75, -72.84, grid) == 12134144
+
+    # Outside the extent, missing and invalid coordinates.
+    assert compute_cellid(91.0, 0.0, grid) is None
+    assert compute_cellid(-90.5, 0.0, grid) is None
+    assert compute_cellid(0.0, 180.0, grid) is None
+    assert compute_cellid(None, 0.0, grid) is None
+    assert compute_cellid("abc", 0.0, grid) is None
+
+
+def test_compute_cellid_with_custom_grid() -> None:
+    """The formula honours whatever grid is configured (legacy 7198x2000 example)."""
     grid = GridSettings(
         subsetting_grid_ncols=7198, subsetting_grid_nrows=2000,
         subsetting_grid_xmin=-180, subsetting_grid_ymin=-50, subsetting_grid_cellsize=0.05,
     )
-
-    # North-west corner cell.
     assert compute_cellid(49.99, -179.99, grid) == 1
-    # Second cell of the first row.
-    assert compute_cellid(49.99, -179.94, grid) == 2
-    # First cell of the second row.
-    assert compute_cellid(49.94, -179.99, grid) == 7199
-    # Last cell of the grid (south-east corner).
-    assert compute_cellid(-49.99, 179.89, grid) == 7198 * 2000
-    # Palmira, Colombia: row floor((50-3.5)/0.05)=930, col floor((180-76.35)/0.05)=2073 -> 930*7198+2073+1
     assert compute_cellid(3.5, -76.35, grid) == 930 * 7198 + 2073 + 1
-
-    # Outside the extent, missing and invalid coordinates.
     assert compute_cellid(60.0, 0.0, grid) is None
-    assert compute_cellid(-60.0, 0.0, grid) is None
-    assert compute_cellid(None, 0.0, grid) is None
-    assert compute_cellid("abc", 0.0, grid) is None
 
 
 def test_add_cellid_column_from_text_coordinates() -> None:
@@ -149,8 +160,9 @@ def test_add_cellid_column_from_text_coordinates() -> None:
 
     result = add_cellid_column(frame, "DECLATITUDE", "DECLONGITUDE", grid)
 
+    # (3.5, -76.35): row floor((90-3.5)/0.05)=1730, col floor((180-76.35)/0.05)=2073
     assert result["cellid"].dtype.name == "Int64"
-    assert result.loc[0, "cellid"] == 930 * 7198 + 2073 + 1
+    assert result.loc[0, "cellid"] == 1730 * 7200 + 2073 + 1
     assert pd.isna(result.loc[1, "cellid"]) and pd.isna(result.loc[2, "cellid"])
     assert "cellid" not in frame.columns  # original untouched
 
@@ -354,3 +366,55 @@ def test_request_errors_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SubsettingRequestError):
         client.list_indicators()
     assert len(recorder.requests) == 2
+
+
+def test_indicators_data_500_without_data_is_not_retried() -> None:
+    """The empty-DataFrame crash of /indicators-data becomes SubsettingNoDataError at once."""
+    from sdks.subsetting import SubsettingNoDataError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/indicators-data"):
+            return httpx.Response(500, text="<h1>Internal Server Error</h1> KeyError: 'cellid'")
+        return default_handler(request)
+
+    client, recorder = _client(handler)
+    with pytest.raises(SubsettingNoDataError):
+        client.get_indicators_data([1, 2], ["ind_cdd"])
+
+    data_calls = [r for r in recorder.requests if r.url.path.endswith("/indicators-data")]
+    assert len(data_calls) == 1
+
+
+def test_parse_coordinates_accepts_negatives() -> None:
+    """The smoke helper parses negative pairs separated by spaces or semicolons."""
+    from scripts.subsetting_smoke import parse_coordinates
+
+    assert parse_coordinates("3.5,-76.35 -12.0,-77.0;19.4,-99.1") == [(3.5, -76.35), (-12.0, -77.0), (19.4, -99.1)]
+    assert parse_coordinates("") == []
+    with pytest.raises(SubsettingError):
+        parse_coordinates("3.5")
+
+
+def test_get_indicator_is_crop_aware() -> None:
+    """Shared prefixes resolve by crop, fall back to generic, and list variants."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/indicators"):
+            return httpx.Response(200, json=[
+                {"category": "Crop-specific indicators", "indicators": [
+                    {"id": "h_beans", "name": "Heat days", "pref": "days_heat", "indicator_type": "specific", "crop": "Beans", "unit": "days"},
+                    {"id": "h_maize", "name": "Heat days", "pref": "days_heat", "indicator_type": "specific", "crop": "Maize", "unit": "days"},
+                    {"id": "h_nc", "name": "Heat days", "pref": "days_heat", "indicator_type": "specific", "crop": "NC", "unit": "days"},
+                ]},
+                {"category": "Drought stress", "indicators": [
+                    {"id": "cdd", "name": "Consecutive dry days", "pref": "CDD", "indicator_type": "generic", "crop": "NC", "unit": "days"},
+                ]},
+            ])
+        return default_handler(request)
+
+    client, _ = _client(handler)
+
+    assert client.get_indicator("days_heat", crop="maize").id == "h_maize"
+    assert client.get_indicator("days_heat").id == "h_nc"
+    assert client.get_indicator("cdd", crop="Beans").id == "cdd"
+    assert [i.id for i in client.get_indicator_variants("Heat days")] == ["h_beans", "h_maize", "h_nc"]
+    assert client.catalogue_crops() == ["Beans", "Maize"]
