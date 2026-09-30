@@ -28,8 +28,10 @@ core/
   logger.py             Logging setup
 sdks/
   genesys/              Genesys PGR client (POST /api/v2/acn/list, AccessionFilter) - see sdks/genesys/README.md
+  subsetting/           Subsetting API client (indicators, indicator data, clusters, cellid) - see sdks/subsetting/README.md
 scripts/
   genesys_smoke.py      Manual check of the Genesys SDK against the real API
+  subsetting_smoke.py   Manual check of the Subsetting SDK against the real API
 tests/                  pytest suite
 ```
 

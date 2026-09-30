@@ -57,7 +57,11 @@ class Settings(BaseSettings):
         genesys_page_size: Records requested per page (max 1000).
         genesys_max_records: Safety cap on records fetched in one search.
         genesys_timeout: HTTP timeout in seconds for Genesys requests.
-        subsetting_api_url: Base URL of the Subsetting (climate) API.
+        subsetting_api_url: Full URL of the Subsetting API incl. version (``.../api/subsetting/v1``).
+        subsetting_api_token: API token tried first (``Authorization: API-Token``).
+        subsetting_access_token: JWT tried as ``Bearer`` header and then as ``access_token`` cookie.
+        subsetting_timeout: HTTP timeout in seconds (clustering can be slow).
+        subsetting_default_period: Indicator period label used by default (``mean``).
         openalex_api_url: Base URL of the OpenAlex API.
         openalex_mailto: Contact email for the OpenAlex polite pool (optional).
         log_level: Logging level name (``DEBUG``, ``INFO``...).
@@ -97,6 +101,10 @@ class Settings(BaseSettings):
     genesys_max_records: int = 5000
     genesys_timeout: float = 60.0
     subsetting_api_url: str | None = None
+    subsetting_api_token: str | None = None
+    subsetting_access_token: str | None = None
+    subsetting_timeout: float = 120.0
+    subsetting_default_period: str = "mean"
     openalex_api_url: str = "https://api.openalex.org"
     openalex_mailto: str | None = None
 
