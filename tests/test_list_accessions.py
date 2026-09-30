@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 
 import httpx
+import pandas as pd
 
 import pandas as pd
 import pytest
@@ -71,7 +72,10 @@ def test_local_mode_loads_excel(session) -> None:
         assert column in state.candidate_list.columns
         assert column not in state.original_list.columns
 
-    assert len(state.activity_log) == 1
+    # Load + cellid computation are logged; cellid is stored in both lists.
+    assert len(state.activity_log) == 2
+    assert result["cellid_computed"] is True and result["georeferenced"] == 5
+    assert "cellid" in state.original_list.columns and "cellid" in state.candidate_list.columns
 
 
 def test_local_mode_accepts_file_name_only_and_csv(session) -> None:
@@ -84,7 +88,7 @@ def test_local_mode_accepts_file_name_only_and_csv(session) -> None:
     )
 
     assert result["status"] == "ok"
-    assert result["total_columns"] == 7
+    assert result["total_columns"] == 8  # 7 passport columns + cellid
 
 
 def test_local_mode_reads_named_sheet_and_rejects_unknown_sheet(session) -> None:
@@ -126,7 +130,7 @@ def test_local_mode_requires_file_path_and_reports_replacement(session) -> None:
 
     assert first["replaced_previous_lists"] is False
     assert second["replaced_previous_lists"] is True
-    assert "replacing" in state.activity_log[-1].description
+    assert any("replacing" in entry.description for entry in state.activity_log)
 
 
 def test_genesys_mode_requires_a_criterion(session) -> None:
@@ -495,3 +499,53 @@ def test_genesys_mode_retries_without_crop_when_taxonomy_given(session) -> None:
     assert result["filter"]["taxonomy"] == {"genus": ["Phaseolus"], "species": ["vulgaris"]}
     assert any("repeated" in note for note in result["notes"])
     assert "taxonomy" in state.activity_log[-1].description or state.candidate_count == 4
+
+
+def test_cellid_is_computed_at_load_and_reported(session) -> None:
+    """Rows with valid coordinates get a cellid; the others stay empty."""
+    state, paths, manager = session
+    uploaded = _upload(manager, "accessions_sample.xlsx")
+
+    result = ListAccessionsSkill().run(state, paths, source="local", file_path=str(uploaded))
+
+    cellids = state.candidate_list["cellid"]
+    assert cellids.notna().all()
+    # Palmira (3.42, -76.52): row floor((50-3.42)/0.05)=931, col floor((180-76.52)/0.05)=2069
+    assert int(cellids.iloc[0]) == 931 * 7198 + 2069 + 1
+    assert result["without_cellid"] == 0
+    assert state.extras["coordinate_columns"] == {"latitude": "DECLATITUDE", "longitude": "DECLONGITUDE"}
+    assert "Computed cellid for 5 of 5" in state.activity_log[-1].description
+
+
+def test_cellid_without_coordinates_and_with_explicit_columns(session, tmp_path: Path) -> None:
+    """No coordinate columns -> no cellid, formal note; explicit columns are honoured."""
+    state, paths, manager = session
+    frame = pd.DataFrame({"ACCENUMB": ["A", "B"], "yy": ["3.42", None], "xx": ["-76.52", "1"]})
+    source = tmp_path / "coords.csv"
+    frame.to_csv(source, index=False)
+    uploaded = manager.store_input_file("s1", source)
+    skill = ListAccessionsSkill()
+
+    plain = skill.run(state, paths, source="local", file_path=str(uploaded))
+    assert plain["status"] == "ok"
+    assert plain["cellid_computed"] is False
+    assert "cellid" not in state.candidate_list.columns
+    assert "not computed" in state.activity_log[-1].description
+
+    explicit = skill.run(
+        state, paths, source="local", file_path=str(uploaded), latitude_column="yy", longitude_column="xx"
+    )
+    assert explicit["cellid_computed"] is True
+    assert explicit["georeferenced"] == 1 and explicit["without_cellid"] == 1
+    assert pd.isna(state.candidate_list["cellid"].iloc[1])
+
+
+def test_genesys_mode_computes_cellid(session) -> None:
+    """Genesys rows carry DECLATITUDE/DECLONGITUDE, so cellid is computed too."""
+    state, paths, _ = session
+    client, _ = _mock_genesys_client(total=3)
+    result = ListAccessionsSkill(client_factory=lambda: client).run(state, paths, source="genesys", genus=["Zea"])
+
+    assert result["cellid_computed"] is True
+    assert result["georeferenced"] == 3
+    assert state.original_list["cellid"].notna().all()
