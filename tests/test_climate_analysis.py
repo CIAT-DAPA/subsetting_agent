@@ -268,8 +268,16 @@ def test_cluster_assigns_clusters_and_keeps_rows(session) -> None:
     assert state.candidate_count == 6
     assert result["clusters"] == 2 and result["cluster_sizes"] == {0: 2, 1: 2}
     assert result["assigned"] == 4 and result["unassigned"] == 2
+    assert result["without_cellid"] == 1 and result["without_climate_data"] == 1
+    assert result["cells_without_climate_data"] == 1
     clusters = state.candidate_list.set_index("ACCENUMB")["cluster_climate"]
     assert clusters["A1"] == 0 and clusters["A2"] == 1 and pd.isna(clusters["A5"]) and pd.isna(clusters["A6"])
+
+    # Unassigned rows explain why in criteria_climate.
+    criteria = state.candidate_list.set_index("ACCENUMB")["criteria_climate"]
+    assert criteria["A5"] == "no climate data in the Subsetting database for cell 5 (indicators CDD, TX)"
+    assert criteria["A6"] == "no coordinates: cellid not available, cluster not computed"
+    assert "without climate data" in state.activity_log[-1].description
     assert "cluster by CDD, TX (period mean, months 3-8) [CDD=5.00, TX=25.00]" in state.candidate_list["criteria_climate"].iloc[0]
     assert result["summary"][0]["indicator"] == "CDD"
 
@@ -318,3 +326,60 @@ def test_errors_are_formal(session, tmp_path: Path) -> None:
 def test_registry_discovers_climate_skill() -> None:
     """The skill is auto-registered."""
     assert "climate_analysis" in SkillRegistry().discover().names()
+
+
+def test_categories_for_query_spanish_and_english() -> None:
+    """Spanish/English vocabulary maps to catalogue categories."""
+    from skills.climate_analysis.engine import categories_for_query
+
+    assert categories_for_query("indicadores para sequía") == ["drought"]
+    assert categories_for_query("heat stress and acid soils") == ["heat", "soil"]
+    assert categories_for_query("suelos") == ["soil"]
+    assert categories_for_query("algo sin sentido") == []
+
+
+def test_cluster_by_query_selects_indicators_in_one_call(session) -> None:
+    """'Crea subconjuntos usando indicadores para sequía' -> one cluster call."""
+    state, paths = session
+    skill, client = make_skill()
+
+    result = skill.run(state, paths, action="cluster", query="indicadores para sequía")
+
+    assert result["status"] == "ok"
+    assert result["subsets_created"] is True
+    assert result["indicators"] == ["CDD", "t_rain"]
+    assert state.candidate_list["cluster_climate"].notna().sum() == 4
+    assert "Indicators chosen for 'indicadores para sequía'" in result["message"]
+
+    soil = skill.run(state, paths, action="cluster", query="suelos")
+    assert soil["status"] == "ok"
+    assert set(soil["indicators"]) == {"PHIHOX", "TEXMHT"}
+
+    nothing = skill.run(state, paths, action="cluster", query="algo sin sentido")
+    assert nothing["status"] == "error" and "list_indicators" in nothing["message"]
+
+
+def test_list_indicators_says_nothing_was_created(session) -> None:
+    """The exploration result tells the model that subsets are still pending."""
+    state, paths = session
+    skill, _ = make_skill()
+
+    result = skill.run(state, paths, action="list_indicators", query="suelo", indicators=["PHIHOX"])
+
+    assert result["subsets_created"] is False
+    assert "NO SUBSET HAS BEEN CREATED YET" in result["message"]
+    assert "cluster" in result["next_step"]
+    assert [i["pref"] for i in result["indicators"]] == ["PHIHOX", "TEXMHT"]
+
+
+def test_filter_condition_without_indicator_uses_query(session) -> None:
+    """A condition lacking 'indicator' borrows the first indicator of the query."""
+    state, paths = session
+    skill, _ = make_skill()
+
+    result = skill.run(state, paths, action="filter", query="pH del suelo",
+                       conditions=[{"operator": "between", "value": [6, 7]}])
+
+    assert result["status"] == "ok"
+    assert result["indicators"] == ["PHIHOX"]
+    assert result["accessions_after"] == 2  # pH 6.5 and 6.0

@@ -32,6 +32,7 @@ from skills.climate_analysis.engine import (
     normalise_months,
     normalise_statistic,
     resolve_indicators,
+    select_indicators_by_query,
     summarise_catalogue,
 )
 from skills.passport_filter.engine import OPERATORS, Condition, FilterError, evaluate_condition, normalise_operator
@@ -60,13 +61,14 @@ class ClimateAnalysisSkill(Skill):
 
     name = "climate_analysis"
     description = (
-        "Work with climate and agro-climatic indicators of the accession collecting sites "
-        "(Subsetting API). action='list_indicators' explores the catalogue (drought, heat, "
-        "flooding, photoperiod, soil, crop-specific) and remembers the chosen indicators; "
-        "action='filter' keeps the accessions whose indicator values satisfy conditions and "
-        "records them in criteria_climate; action='cluster' groups the accessions (2-10 "
-        "clusters) by the indicators and writes cluster_climate. Requires the 'cellid' "
-        "computed when the list was loaded."
+        "Create subsets of the Candidate list with CLIMATE and SOIL indicators of the accession "
+        "collecting sites (drought, heat, flooding, photoperiod, crop-specific days, soil pH, "
+        "texture, organic carbon, salinity). action='cluster' GROUPS the accessions into 2-10 "
+        "clusters (use it when the user asks to create subsets/groups) and writes "
+        "cluster_climate; action='filter' KEEPS the accessions whose indicator values satisfy "
+        "thresholds and records them in criteria_climate; action='list_indicators' only "
+        "explores the catalogue (it creates nothing). Indicators can be given by name "
+        "(indicators=['CDD','t_rain']) or by need (query='drought' / 'suelo')."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -78,7 +80,11 @@ class ClimateAnalysisSkill(Skill):
             },
             "query": {
                 "type": "string",
-                "description": "list_indicators: free text such as 'drought', 'heat', 'soil', 'CDD'.",
+                "description": (
+                    "Need expressed in words, e.g. 'drought', 'sequía', 'heat', 'soil', 'suelos ácidos'. "
+                    "For cluster/filter it selects the indicators automatically when 'indicators' is empty; "
+                    "for list_indicators it filters the catalogue."
+                ),
             },
             "indicators": {
                 "type": "array",
@@ -186,9 +192,9 @@ class ClimateAnalysisSkill(Skill):
                 return guard
 
             if mode == "filter":
-                return self._filter(state, conditions, logic, months, period, crop)
+                return self._filter(state, conditions, logic, months, period, crop, query)
             if mode == "cluster":
-                return self._cluster(state, indicators, months, period, crop, min_clusters, max_clusters)
+                return self._cluster(state, indicators, months, period, crop, min_clusters, max_clusters, query)
 
             return self.error(f"Unknown action '{action}'. Use 'list_indicators', 'filter' or 'cluster'.")
         except (ClimateError, FilterError) as exc:
@@ -302,12 +308,20 @@ class ClimateAnalysisSkill(Skill):
         if remembered:
             message += f". Remembered for the next steps: {remembered}"
 
+        message += (
+            ". NO SUBSET HAS BEEN CREATED YET: this action only explores the catalogue. To create "
+            "subsets call action='cluster' (groups) or action='filter' (thresholds) now with these "
+            "indicators."
+        )
+
         return self.ok(
-            message + ".",
+            message,
             indicators=catalogue,
             remembered=remembered,
             crops=client.catalogue_crops(),
             periods=sorted({p.period for p in client.list_indicator_periods()}),
+            next_step="Call action='cluster' or action='filter' to actually create the subsets.",
+            subsets_created=False,
         )
 
     # -------------------------------------------------------------- filter
@@ -319,6 +333,7 @@ class ClimateAnalysisSkill(Skill):
         months: Any,
         period: str | None,
         crop: str | None,
+        query: str | None = None,
     ) -> dict[str, Any]:
         """Keep the accessions whose indicator values satisfy the conditions.
 
@@ -329,6 +344,7 @@ class ClimateAnalysisSkill(Skill):
             months: Default month range for conditions without their own.
             period: Indicator period label.
             crop: Crop for crop-specific indicators.
+            query: Need in words; fills the indicator of conditions that omit it.
 
         Returns:
             Tool result with counts and criteria.
@@ -343,8 +359,13 @@ class ClimateAnalysisSkill(Skill):
         default_months = normalise_months(months)
         names = [str(item.get("indicator") or item.get("pref") or item.get("name") or "") for item in conditions]
 
+        # Conditions without an indicator can borrow the first indicator matching the query.
         if any(not name for name in names):
-            raise ClimateError("Every condition needs an 'indicator'.")
+            if not query:
+                raise ClimateError("Every condition needs an 'indicator' (or give a 'query' describing the need).")
+
+            fallback = select_indicators_by_query(client, query, crop_name, limit=1)[0].label
+            names = [name or fallback for name in names]
 
         resolved = resolve_indicators(client, names, crop_name)
         by_name = {item.requested_as: item for item in resolved}
@@ -434,6 +455,7 @@ class ClimateAnalysisSkill(Skill):
 
         return self.ok(
             f"{description}. Criteria and values recorded in '{CRITERIA_COLUMN}'; '{CLUSTER_COLUMN}' set to 0.",
+            subsets_created=True,
             criteria=criteria_text,
             accessions_before=before,
             accessions_after=after,
@@ -454,8 +476,9 @@ class ClimateAnalysisSkill(Skill):
         crop: str | None,
         min_clusters: Any,
         max_clusters: Any,
+        query: str | None = None,
     ) -> dict[str, Any]:
-        """Group the accessions by climate indicators without filtering.
+        """Group the accessions by climate/soil indicators without filtering.
 
         Args:
             state: Session state.
@@ -465,6 +488,7 @@ class ClimateAnalysisSkill(Skill):
             crop: Crop for crop-specific indicators and for the API ``cellid_list``.
             min_clusters: Lower bound (default 2).
             max_clusters: Upper bound (default 10).
+            query: Need in words used to pick the indicators when none is given.
 
         Returns:
             Tool result with cluster sizes and the API summary.
@@ -472,18 +496,21 @@ class ClimateAnalysisSkill(Skill):
         client = self._get_client()
         crop_name = self._resolve_crop(state, crop)
         names = [str(item) for item in (as_list(indicators) or [])]
+        selection_note = ""
 
-        # Fall back to the indicators remembered from list_indicators/filter.
-        if not names and state.climate_indicators:
-            names = list(state.climate_indicators)
-
-        if not names:
+        # Indicator selection order: explicit names > need in words > remembered ones.
+        if names:
+            resolved = resolve_indicators(client, names, crop_name)
+        elif query and str(query).strip():
+            resolved = select_indicators_by_query(client, str(query), crop_name)
+            selection_note = f" Indicators chosen for '{query}': {[item.label for item in resolved]}."
+        elif state.climate_indicators:
+            resolved = resolve_indicators(client, list(state.climate_indicators), crop_name)
+        else:
             raise ClimateError(
-                "action='cluster' needs the indicators to cluster by (argument 'indicators'), or a "
-                "previous action='list_indicators' that remembered them."
+                "action='cluster' needs the indicators to cluster by: give 'indicators' (e.g. "
+                "['CDD','t_rain']) or a 'query' describing the need (e.g. 'drought', 'soil')."
             )
-
-        resolved = resolve_indicators(client, names, crop_name)
         window = normalise_months(months)
         low = as_int(min_clusters) or MIN_CLUSTERS
         high = as_int(max_clusters) or MAX_CLUSTERS
@@ -517,26 +544,53 @@ class ClimateAnalysisSkill(Skill):
             candidate.loc[has_cluster, CRITERIA_COLUMN], texts[has_cluster]
         )
         candidate.loc[has_cluster, CLUSTER_COLUMN] = assigned[has_cluster].astype(int)
+
+        # Unassigned rows get an explanation so the exported CSV is self-explanatory.
+        no_cell = cell_series.isna()
+        no_data = cell_series.notna() & ~has_cluster
+        indicator_list = ", ".join(labels)
+        candidate.loc[no_cell, CRITERIA_COLUMN] = self._append_criteria(
+            candidate.loc[no_cell, CRITERIA_COLUMN],
+            pd.Series("no coordinates: cellid not available, cluster not computed", index=candidate.index[no_cell]),
+        )
+        candidate.loc[no_data, CRITERIA_COLUMN] = self._append_criteria(
+            candidate.loc[no_data, CRITERIA_COLUMN],
+            cell_series[no_data].map(
+                lambda cell: f"no climate data in the Subsetting database for cell {int(cell)} (indicators {indicator_list})"
+            ),
+        )
+
         state.update_candidate_list(candidate)
         state.climate_indicators = [item.indicator.id for item in resolved]
 
         sizes = assigned[has_cluster].astype(int).value_counts().sort_index()
         cluster_sizes = {int(k): int(v) for k, v in sizes.items()}
         unassigned = int((~has_cluster).sum())
+        without_cellid = int(no_cell.sum())
+        without_data = int(no_data.sum())
+        cells_without_data = int(cell_series[no_data].nunique())
 
         description = (
             f"Clustered Candidate list by climate indicators {labels} into {result.cluster_count} clusters "
             f"(period {period or client.default_period}, months {window[0]}-{window[1]}); "
-            f"{int(has_cluster.sum())} accessions assigned, {unassigned} without cluster"
+            f"{int(has_cluster.sum())} accessions assigned, {unassigned} without cluster "
+            f"({without_cellid} without coordinates, {without_data} in {cells_without_data} cells without climate data)"
         )
         state.log_activity(self.name, description)
 
         return self.ok(
-            f"{description}. Cluster of each accession written in '{CLUSTER_COLUMN}'; indicators and values in '{CRITERIA_COLUMN}'.",
+            f"{description}.{selection_note} Cluster of each accession written in '{CLUSTER_COLUMN}'; "
+            f"indicators and values in '{CRITERIA_COLUMN}'. Accessions without cluster have the reason "
+            f"written in '{CRITERIA_COLUMN}'. Tell the user explicitly that the Subsetting database has no "
+            "climate data for those collecting sites (it is a data coverage gap, not an error).",
+            subsets_created=True,
             clusters=result.cluster_count,
             cluster_sizes=cluster_sizes,
             assigned=int(has_cluster.sum()),
             unassigned=unassigned,
+            without_cellid=without_cellid,
+            without_climate_data=without_data,
+            cells_without_climate_data=cells_without_data,
             indicators=labels,
             period=period or client.default_period,
             months=list(window),

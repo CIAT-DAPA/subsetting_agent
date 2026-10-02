@@ -317,10 +317,17 @@ def summarise_catalogue(indicators: list[Indicator], query: str | None = None) -
         One entry per prefix with category, type, unit, name and available crops.
     """
     grouped: dict[str, dict[str, Any]] = {}
+    categories = categories_for_query(query) if query else []
 
     for indicator in indicators:
-        # Skip entries that do not match the query.
-        if query and not indicator.matches(query):
+        in_category = any(
+            category in (indicator.category or "").lower()
+            or (category == "crop-specific" and (indicator.indicator_type or "").lower() == "specific")
+            for category in categories
+        )
+
+        # Skip entries that match neither the text nor the categories it implies.
+        if query and not (indicator.matches(query) or in_category):
             continue
 
         entry = grouped.setdefault(
@@ -345,3 +352,120 @@ def summarise_catalogue(indicators: list[Indicator], query: str | None = None) -
         entry["crops"] = sorted(entry["crops"]) or ["all (generic)"]
 
     return sorted(grouped.values(), key=lambda item: (item["category"] or "", item["pref"]))
+
+
+# ------------------------------------------------------------- by query
+# User vocabulary (Spanish/English) mapped to catalogue categories/prefixes.
+QUERY_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "drought": ("drought", "sequia", "sequía", "seco", "dry", "aridez", "arid", "lluvia", "rain", "precipit"),
+    "heat": ("heat", "calor", "temperatura", "temperature", "termico", "térmico", "vpd", "calido", "cálido"),
+    "flooding": ("flood", "inundacion", "inundación", "anegamiento", "waterlogging", "exceso de agua", "humedad"),
+    "photoperiod": ("photoperiod", "fotoperiodo", "daylength", "radiacion", "radiación", "radiation", "luz"),
+    "soil": ("soil", "suelo", "suelos", "edaf", "ph", "textura", "texture", "salinidad", "salinity", "carbono", "carbon", "fertilidad"),
+    "crop-specific": ("crop-specific", "specific", "cultivo", "dias de calor", "días de calor", "dias frios", "días fríos", "optimo", "óptimo"),
+}
+
+# Maximum indicators chosen automatically from a free-text need.
+MAX_AUTO_INDICATORS = 5
+
+
+def categories_for_query(query: str) -> list[str]:
+    """Translate a free-text need into catalogue category keywords.
+
+    Args:
+        query: Text such as ``"sequía"``, ``"drought tolerance"`` or ``"suelos ácidos"``.
+
+    Returns:
+        Category keywords (``drought``, ``heat``, ``flooding``, ``photoperiod``,
+        ``soil``, ``crop-specific``) found in the text; empty when none matches.
+    """
+    text = query.strip().lower()
+    found: list[str] = []
+
+    # Every category whose synonyms appear in the text is selected.
+    for category, synonyms in QUERY_SYNONYMS.items():
+        if any(synonym in text for synonym in synonyms):
+            found.append(category)
+
+    return found
+
+
+def select_indicators_by_query(
+    client: SubsettingClient,
+    query: str,
+    crop: str | None,
+    limit: int = MAX_AUTO_INDICATORS,
+) -> list[ResolvedIndicator]:
+    """Choose indicators for a need expressed in words (step 2 of the business rules).
+
+    Generic indicators of the matching categories are preferred; crop-specific
+    ones are added only when a crop is known. Exact prefixes/names inside the
+    query (``"CDD"``) are honoured too.
+
+    Args:
+        client: Subsetting client (catalogue access).
+        query: Free text describing the need.
+        crop: Crop used for crop-specific indicators.
+        limit: Maximum number of indicators returned.
+
+    Returns:
+        Resolved indicators (at least one).
+
+    Raises:
+        ClimateError: If nothing in the catalogue matches the text.
+    """
+    catalogue = client.list_indicators()
+    categories = categories_for_query(query)
+    chosen: list[Indicator] = []
+    seen: set[str] = set()
+
+    def add(indicator: Indicator) -> None:
+        """Append an indicator once (by prefix for generic ones)."""
+        key = indicator.id
+
+        if key not in seen and len(chosen) < limit:
+            seen.add(key)
+            chosen.append(indicator)
+
+    # 1) Prefixes or names written literally in the query.
+    for token in re.split(r"[\s,;/]+", query):
+        for indicator in client.get_indicator_variants(token) if token else []:
+            is_generic = (indicator.crop or "").strip().upper() == "NC"
+            if is_generic or (crop and (indicator.crop or "").strip().lower() == crop.strip().lower()):
+                add(indicator)
+
+    # 2) Indicators of the matching categories (generic first, then crop-specific for the crop).
+    for category in categories:
+        for indicator in catalogue:
+            in_category = category in (indicator.category or "").lower() or (
+                category == "crop-specific" and (indicator.indicator_type or "").lower() == "specific"
+            )
+            if not in_category:
+                continue
+
+            is_generic = (indicator.crop or "").strip().upper() == "NC"
+
+            if is_generic and (indicator.indicator_type or "").lower() != "specific":
+                add(indicator)
+
+        for indicator in catalogue:
+            in_category = category in (indicator.category or "").lower() or (
+                category == "crop-specific" and (indicator.indicator_type or "").lower() == "specific"
+            )
+            if in_category and crop and (indicator.crop or "").strip().lower() == crop.strip().lower():
+                add(indicator)
+
+    # 3) Fallback: free-text match on name/category.
+    if not chosen:
+        for indicator in catalogue:
+            if indicator.matches(query) and (indicator.crop or "").strip().upper() == "NC":
+                add(indicator)
+
+    if not chosen:
+        raise ClimateError(
+            f"No indicator in the catalogue matches '{query}'. Try terms such as drought/sequía, "
+            "heat/calor, flooding/inundación, photoperiod/fotoperiodo, soil/suelo, or name the "
+            "indicators (CDD, t_rain, TX, PHIHOX...). Use action='list_indicators' to explore."
+        )
+
+    return [ResolvedIndicator(indicator=indicator, requested_as=query) for indicator in chosen]
