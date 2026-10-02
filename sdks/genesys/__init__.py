@@ -8,6 +8,15 @@ from sdks.genesys.errors import (
     GenesysError,
     GenesysRequestError,
 )
+from sdks.genesys.traits import (
+    DatasetAccessionRef,
+    DatasetSummary,
+    Descriptor,
+    TraitPage,
+    accession_observations_to_rows,
+    observations_to_dataframe,
+    unwrap_values,
+)
 from sdks.genesys.models import (
     MCPD_FIELD_MAP,
     AccessionFilter,
@@ -46,4 +55,11 @@ __all__ = [
     "StringFilter",
     "TaxonomyFilter",
     "TemporalFilter",
+    "DatasetAccessionRef",
+    "DatasetSummary",
+    "Descriptor",
+    "TraitPage",
+    "observations_to_dataframe",
+    "accession_observations_to_rows",
+    "unwrap_values",
 ]

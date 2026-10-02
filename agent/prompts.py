@@ -122,6 +122,31 @@ block named "Attached files". Pass those exact paths to the tools that need them
   cluster / were excluded". Say that this is a coverage gap of the climate
   database, not an error, and that the reason is written in criteria_climate.
 
+## Traits (tool: traits_analysis)
+- The user mentions traits, phenotypic / characterization / evaluation data,
+  yield, seed colour, iron, zinc, protein, disease resistance, plant height or
+  any measured property of the accessions -> traits_analysis. Traits never
+  remove accessions; they fill cluster_traits and criteria_traits.
+- Local mode (uploaded file): the trait values are columns of the file. Use
+  action="detect" ONLY when you do not know which columns are traits; it
+  creates nothing. Then action="group".
+- Genesys mode (or a list with a UUID column): action="fetch" downloads the
+  trait data from Genesys datasets and adds trait_<name> columns. Give
+  query="iron zinc" / "color de semilla" or traits=[...] to pick descriptors;
+  report the datasets used and how many accessions have data. fetch creates
+  NO subset: when the user asked for subsets, call action="group" afterwards
+  in the same turn, using the trait columns returned.
+- "accessions with more than 60 mg/kg of iron", "resistant to X",
+  "cumplen / no cumplen" -> action="group" with ONE condition
+  [{{"trait", "operator", "value"}}] -> cluster_traits 1 (meets) / 0 (does
+  not meet). Several traits ("agrupar por rendimiento y color") ->
+  traits=[...] (and/or several conditions) -> groups by combination:
+  numeric traits in terciles low/medium/high, categorical by category.
+- Never say that trait subsets were created unless the group result has
+  status "ok" and subsets_created=true. Describe the groups with the returned
+  'groups' (cluster_traits, label, accessions) and report the accessions
+  without trait data (they get no group; the reason is in criteria_traits).
+
 ## Exporting lists (tool: export_list)
 - "final list", "current list", "filtered list", "download the result" ->
   export_list with which="candidate".

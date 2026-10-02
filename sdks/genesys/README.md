@@ -88,6 +88,42 @@ Multi-valued properties (`STORAGE`, `DUPLSITE`, `COLLCODE`...) are joined with `
 against `shortName`, `name` and `otherNames`. Use it instead of guessing crop
 codes: `uv run python scripts/genesys_smoke.py --list-crops` prints the catalogue.
 
+## Trait data (datasets, descriptors, observations)
+
+`GenesysClient` also implements the four-step trait workflow of the spec
+(`sdks/genesys/traits.py`):
+
+| Step | Method | Endpoint |
+|------|--------|----------|
+| 1 | `find_datasets(filter)` / `find_datasets_for_uuids(uuids)` | `POST /api/v2/dataset/accessions-datasets` → dataset UUIDs |
+| 1b | `get_dataset(uuid)` | `GET /api/v2/dataset/{uuid}` → `DatasetSummary` (title, crops, counts, inline descriptors) |
+| 2 | `list_dataset_descriptors(uuid)` | `GET /api/v2/dataset/{uuid}/descriptors` → `Descriptor[]` (uuid, columnName, dataType, category, uom, terms) |
+| 2b | `iter_dataset_accessions(uuid)` | `GET /api/v2/dataset/accessions/{uuid}` → `DatasetAccessionRef` (acceNumb, instCode, doi, matched uuid) |
+| 3 | `get_dataset_data(datasets, descriptors, filter)` / `iter_dataset_data` | `POST /api/v2/dataset/data?datasetUuids=&fields=` body `{"filters": {"accession": ...}, "select": []}` → raw rows |
+| 3-alt | `get_accession_observations(uuid)` | `GET /api/v2/acn/{uuid}/observations` → raw first/third party data |
+| 4 | `get_descriptor(uuid)` | `GET /api/v2/descriptor/{uuid}` |
+
+Observation rows are untyped in the spec; the real shapes (verified against
+production on 2026-10-02) are:
+
+```json
+// POST /dataset/data  -> one row per accession, values are LISTS (one per observation)
+{"accession": "<accession uuid>", "accessionNumber": "G7236", "doi": "10.18730/JFFX3",
+ "<descriptor uuid>": [55.9], "<descriptor uuid>": [45462.0]}
+
+// GET /acn/{uuid}/observations -> firstPartyData[] / thirdPartyData[]
+{"accession": "<uuid>", "accessionNumber": "G4680", "instituteCode": "COL003", "genus": "Phaseolus",
+ "sources": {"<source uuid>": [{"f": "<descriptor uuid>", "v": [18.0], "d": "<dataset uuid>", "r": 20120, "s": 0, "c": "C6"}]}}
+```
+
+`observations_to_dataframe(rows, descriptors)` turns `/dataset/data` rows into a
+table with `uuid, doi, accessionNumber, instituteCode` plus one column per
+descriptor (`columnName`); one-element lists are unwrapped, several observations
+stay as a list for the caller to aggregate. `accession_observations_to_rows(payload,
+dataset_uuid=None)` converts the per-accession endpoint into the same row shape
+(`{"<descriptor uuid>": [values...]}`) so both feed the same parser. Run
+`uv run python scripts/genesys_traits_smoke.py --from-csv <export.csv>` to see raw rows.
+
 ## Errors
 
 `GenesysAuthError` (401/403 or token problems), `GenesysRequestError`

@@ -359,3 +359,123 @@ def test_list_crops_and_resolve_codes() -> None:
     assert resolved == ["beans", "maize"]
     assert unresolved == ["papaya", ""]
     assert calls["n"] == 1
+
+
+# ------------------------------------------------------------------ traits
+DESCRIPTORS_PAYLOAD = [
+    {"uuid": "d-yield", "title": "Grain yield", "columnName": "YIELD", "dataType": "NUMERIC", "category": "EVALUATION", "uom": "kg/ha", "minValue": 0, "maxValue": 9000},
+    {"uuid": "d-color", "title": "Seed colour", "columnName": "SEEDCOL", "dataType": "CODED", "category": "CHARACTERIZATION",
+     "terms": [{"code": "1", "title": "White"}, {"code": "2", "title": "Red"}]},
+]
+
+
+def traits_handler(request: httpx.Request) -> httpx.Response:
+    """Mock of the trait endpoints with plausible shapes."""
+    path = request.url.path
+    if path == "/api/v2/dataset/accessions-datasets":
+        body = json.loads(request.content)
+        return httpx.Response(200, json=["ds-1"] if body.get("uuid") else [])
+    if path == "/api/v2/dataset/ds-1":
+        return httpx.Response(200, json={"uuid": "ds-1", "title": "Bean trial", "crops": ["beans"], "accessionCount": 2,
+                                         "descriptorCount": 2, "descriptors": DESCRIPTORS_PAYLOAD})
+    if path == "/api/v2/dataset/ds-1/descriptors":
+        return httpx.Response(200, json=DESCRIPTORS_PAYLOAD)
+    if path == "/api/v2/dataset/accessions/ds-1":
+        return httpx.Response(200, json={"content": [{"acceNumb": "G1", "instCode": "COL003", "doi": None, "accession": {"uuid": "u1"}},
+                                                     {"acceNumb": "G9", "instCode": "COL003", "accession": None}], "last": True})
+    if path == "/api/v2/dataset/data":
+        assert request.url.params.get_list("datasetUuids") == ["ds-1"]
+        assert request.url.params.get_list("fields") == ["d-yield", "d-color"]
+        body = json.loads(request.content)
+        assert body["filters"] == {"accession": {"uuid": ["u1", "u2"]}}
+        rows = [
+            {"accession": "u1", "accessionNumber": "G1", "doi": "10.1/a", "d-yield": [1200.5], "d-color": ["2"]},
+            {"accession": "u2", "accessionNumber": "G2", "d-yield": [800, 820], "d-color": ["1"]},
+        ]
+        return httpx.Response(200, json={"content": rows, "number": 0, "size": 50, "totalElements": 2, "totalPages": 1, "last": True})
+    if path == "/api/v2/acn/u1/observations":
+        return httpx.Response(200, json={"firstPartyData": [{"d-yield": 1200.5}], "thirdPartyData": []})
+    if path == "/api/v2/descriptor/d-yield":
+        return httpx.Response(200, json=DESCRIPTORS_PAYLOAD[0])
+    return httpx.Response(404, text=path)
+
+
+def test_trait_workflow_endpoints() -> None:
+    """Steps 1-4 hit the right endpoints and parse the typed parts."""
+    client, _ = _client(traits_handler)
+
+    assert client.find_datasets_for_uuids(["u1", "u2", "u1"]) == ["ds-1"]
+    assert client.find_datasets_for_uuids([]) == []
+
+    summary = client.get_dataset("ds-1")
+    assert summary.title == "Bean trial" and [d.label for d in summary.descriptors] == ["YIELD", "SEEDCOL"]
+
+    descriptors = client.list_dataset_descriptors("ds-1")
+    assert descriptors[0].is_numeric and descriptors[1].is_categorical
+    assert descriptors[1].terms[1].title == "Red"
+    assert descriptors[0].matches("yield") and not descriptors[0].matches("colour")
+
+    refs = list(client.iter_dataset_accessions("ds-1"))
+    assert [r.acce_numb for r in refs] == ["G1", "G9"] and refs[0].uuid == "u1" and refs[1].uuid is None
+
+    page = client.get_dataset_data(["ds-1"], ["d-yield", "d-color"], AccessionFilter(uuid=["u1", "u2"]))
+    assert page.total_elements == 2 and len(page.content) == 2
+
+    assert client.get_accession_observations("u1")["firstPartyData"][0]["d-yield"] == 1200.5
+    assert client.get_descriptor("d-yield").uom == "kg/ha"
+
+
+def test_observations_to_dataframe_real_and_alternative_shapes() -> None:
+    """Real /dataset/data rows (accession uuid string, list values) and nested variants."""
+    from sdks.genesys import Descriptor, observations_to_dataframe
+
+    descriptors = [Descriptor.model_validate(item) for item in DESCRIPTORS_PAYLOAD]
+    rows = [
+        # Real shape verified against production.
+        {"accession": "u1", "accessionNumber": "G1", "doi": "10.1/a", "d-yield": [1200.5], "d-color": ["2"]},
+        # Several observations are kept as a list; column names also work.
+        {"accession": "u2", "accessionNumber": "G2", "YIELD": [800, 820], "SEEDCOL": ["1"], "extra": ["x"]},
+        # Nested reference variant.
+        {"accessionRef": {"acceNumb": "G3", "instCode": "COL003", "accession": {"uuid": "u3"}}, "d-yield": 700},
+    ]
+    frame = observations_to_dataframe(rows, descriptors)
+
+    assert list(frame.columns[:6]) == ["uuid", "doi", "accessionNumber", "instituteCode", "YIELD", "SEEDCOL"]
+    assert list(frame["uuid"]) == ["u1", "u2", "u3"]
+    assert list(frame["accessionNumber"]) == ["G1", "G2", "G3"]
+    assert frame.loc[0, "YIELD"] == 1200.5 and frame.loc[1, "YIELD"] == [800, 820] and frame.loc[2, "YIELD"] == 700
+    assert list(frame["SEEDCOL"][:2]) == ["2", "1"]
+    assert frame.loc[1, "extra"] == "x" and frame.loc[2, "instituteCode"] == "COL003"
+
+    empty = observations_to_dataframe([], descriptors)
+    assert empty.empty and "YIELD" in empty.columns
+
+
+def test_accession_observations_to_rows_real_shape() -> None:
+    """The per-accession observations endpoint is converted into data-like rows."""
+    from sdks.genesys import accession_observations_to_rows, Descriptor, observations_to_dataframe
+
+    payload = {
+        "firstPartyData": [{
+            "accession": "7d3c", "accessionNumber": "G4680", "doi": "10.18730/JPV7P", "genus": "Phaseolus", "instituteCode": "COL003",
+            "sources": {
+                "src-1": [
+                    {"f": "d-yield", "s": 0, "r": 20120, "v": [18.0], "c": "C6", "d": "ds-1"},
+                    {"f": "d-yield", "s": 0, "r": 20121, "v": [20.0], "c": "C6", "d": "ds-1"},
+                    {"f": "d-color", "s": 0, "r": 20120, "v": ["Yellow"], "c": "C5", "d": "ds-1"},
+                    {"f": "d-other", "v": [1], "d": "ds-2"},
+                ]
+            },
+        }],
+        "thirdPartyData": [],
+    }
+    rows = accession_observations_to_rows(payload)
+    assert rows[0]["accession"] == "7d3c" and rows[0]["d-yield"] == [18.0, 20.0] and rows[0]["d-color"] == ["Yellow"]
+    assert rows[0]["d-other"] == [1] and rows[0]["party"] == "firstPartyData"
+
+    only_ds1 = accession_observations_to_rows(payload, dataset_uuid="ds-1")
+    assert "d-other" not in only_ds1[0]
+
+    frame = observations_to_dataframe(rows, [Descriptor.model_validate(item) for item in DESCRIPTORS_PAYLOAD])
+    assert frame.loc[0, "uuid"] == "7d3c" and frame.loc[0, "YIELD"] == [18.0, 20.0] and frame.loc[0, "SEEDCOL"] == "Yellow"
+    assert frame.loc[0, "instituteCode"] == "COL003"
