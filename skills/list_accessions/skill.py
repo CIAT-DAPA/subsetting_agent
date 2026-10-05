@@ -14,10 +14,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from core.config import get_settings
 from core.logger import get_logger
 from core.session import SessionPaths
 from core.state import SessionState, SourceMode
+from sdks.subsetting import add_cellid_column
 from sdks.genesys import (
     AccessionFilter,
     CountryFilter,
@@ -42,6 +45,8 @@ logger = get_logger(__name__)
 
 # Maximum number of column names echoed back to the model.
 _MAX_COLUMNS_IN_RESULT = 60
+# Name of the column that stores the base-raster cell id of each accession.
+CELLID_COLUMN = "cellid"
 
 # Factory that builds a Genesys client on demand (injectable for tests).
 ClientFactory = Callable[[], GenesysClient]
@@ -84,6 +89,14 @@ class ListAccessionsSkill(Skill):
             "sheet_name": {
                 "type": "string",
                 "description": "Excel sheet to read. Defaults to the first sheet.",
+            },
+            "latitude_column": {
+                "type": "string",
+                "description": "Column with the latitude, only when the tool could not detect it.",
+            },
+            "longitude_column": {
+                "type": "string",
+                "description": "Column with the longitude, only when the tool could not detect it.",
             },
             "crop": {
                 "type": "array",
@@ -165,6 +178,8 @@ class ListAccessionsSkill(Skill):
         source: str = "",
         file_path: str | None = None,
         sheet_name: str | None = None,
+        latitude_column: str | None = None,
+        longitude_column: str | None = None,
         crop: list[str] | str | None = None,
         genus: list[str] | str | None = None,
         species: list[str] | str | None = None,
@@ -186,6 +201,8 @@ class ListAccessionsSkill(Skill):
             source: ``"local"`` or ``"genesys"``.
             file_path: Attached file path (local mode).
             sheet_name: Excel sheet (local mode, optional).
+            latitude_column: Column holding the latitude when auto-detection fails.
+            longitude_column: Column holding the longitude when auto-detection fails.
             crop: Genesys crop codes (genesys mode).
             genus: Genera (genesys mode).
             species: Specific epithets (genesys mode).
@@ -203,10 +220,11 @@ class ListAccessionsSkill(Skill):
             Tool result dictionary.
         """
         mode = (source or "").strip().lower()
+        coordinate_hint = (latitude_column, longitude_column)
 
         # Route by mode; anything else is a model mistake we report explicitly.
         if mode == SourceMode.LOCAL.value:
-            return self._run_local(state, paths, file_path, sheet_name)
+            return self._run_local(state, paths, file_path, sheet_name, coordinate_hint)
 
         if mode == SourceMode.GENESYS.value:
             return self._run_genesys(
@@ -221,6 +239,7 @@ class ListAccessionsSkill(Skill):
                 text=text or query,
                 historic=as_bool(historic),
                 max_records=as_int(max_records),
+                coordinate_hint=coordinate_hint,
             )
 
         return self.error(
@@ -235,6 +254,7 @@ class ListAccessionsSkill(Skill):
         paths: SessionPaths,
         file_path: str | None,
         sheet_name: str | None,
+        coordinate_hint: tuple[str | None, str | None] = (None, None),
     ) -> dict[str, Any]:
         """Load accessions from an uploaded Excel/CSV file.
 
@@ -243,6 +263,7 @@ class ListAccessionsSkill(Skill):
             paths: Session folders.
             file_path: Path of the uploaded file.
             sheet_name: Excel sheet to read (optional).
+            coordinate_hint: ``(latitude_column, longitude_column)`` given by the model.
 
         Returns:
             Tool result with the shape of the loaded table.
@@ -271,9 +292,12 @@ class ListAccessionsSkill(Skill):
         except (FileNotFoundError, ValueError) as exc:
             return self.error(str(exc))
 
+        dataframe, geo = self._attach_cellid(dataframe, coordinate_hint)
+
         replaced = state.has_data
         state.set_original_list(dataframe, SourceMode.LOCAL)
         state.extras["source_file"] = str(resolved)
+        state.extras["coordinate_columns"] = geo["coordinate_columns"]
 
         description = f"Loaded {len(dataframe)} accessions from file '{resolved.name}' (local mode)"
 
@@ -282,19 +306,93 @@ class ListAccessionsSkill(Skill):
             description += ", replacing the previous Original and Candidate lists"
 
         state.log_activity(self.name, description)
+        self._log_cellid(state, geo)
 
         columns = [str(column) for column in dataframe.columns]
-        coordinates = detect_coordinate_columns(columns)
 
         return self.ok(
-            f"{description}. All {len(columns)} columns are treated as passport data.",
+            f"{description}. All {len(columns)} columns are treated as passport data. {geo['message']}",
             mode=SourceMode.LOCAL.value,
             accessions=len(dataframe),
             columns=columns[:_MAX_COLUMNS_IN_RESULT],
             total_columns=len(columns),
-            coordinate_columns=coordinates,
             replaced_previous_lists=replaced,
+            **{key: value for key, value in geo.items() if key != "message"},
         )
+
+    # ------------------------------------------------------------ cellid
+    @staticmethod
+    def _attach_cellid(
+        dataframe: pd.DataFrame, coordinate_hint: tuple[str | None, str | None] = (None, None)
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        """Compute the base-raster cell id for every georeferenced accession.
+
+        The cell id is a property of the accession, so it is computed once at
+        load time and stored in both the Original and the Candidate lists.
+
+        Args:
+            dataframe: Loaded accessions.
+            coordinate_hint: Latitude/longitude columns given explicitly by the
+                model; auto-detection is used when they are missing.
+
+        Returns:
+            ``(dataframe, info)`` where ``info`` holds ``coordinate_columns``,
+            ``georeferenced``, ``without_cellid``, ``cellid_computed`` and a
+            human readable ``message``.
+        """
+        columns = [str(column) for column in dataframe.columns]
+        detected = detect_coordinate_columns(columns)
+        latitude = coordinate_hint[0] if coordinate_hint[0] in columns else detected["latitude"]
+        longitude = coordinate_hint[1] if coordinate_hint[1] in columns else detected["longitude"]
+        coordinates = {"latitude": latitude, "longitude": longitude}
+
+        # Without both coordinate columns the cell id cannot be computed.
+        if not latitude or not longitude:
+            return dataframe, {
+                "coordinate_columns": coordinates,
+                "cellid_computed": False,
+                "georeferenced": 0,
+                "without_cellid": len(dataframe),
+                "message": (
+                    "Latitude/longitude columns were not detected, so the 'cellid' needed by the "
+                    "climate tools was not computed. If the file has coordinates, ask the user which "
+                    "columns hold latitude and longitude and reload with latitude_column/longitude_column."
+                ),
+            }
+
+        with_cellid = add_cellid_column(dataframe, latitude, longitude, get_settings().grid, CELLID_COLUMN)
+        georeferenced = int(with_cellid[CELLID_COLUMN].notna().sum())
+        missing = len(with_cellid) - georeferenced
+
+        return with_cellid, {
+            "coordinate_columns": coordinates,
+            "cellid_computed": True,
+            "georeferenced": georeferenced,
+            "without_cellid": missing,
+            "message": (
+                f"Computed 'cellid' for {georeferenced} accessions with valid coordinates "
+                f"({latitude}/{longitude}); {missing} accessions have no usable coordinates."
+            ),
+        }
+
+    def _log_cellid(self, state: SessionState, geo: dict[str, Any]) -> None:
+        """Record the cell id computation in the session activity log.
+
+        Args:
+            state: Session state.
+            geo: Information returned by :meth:`_attach_cellid`.
+        """
+        # Log both outcomes so the user sees why climate tools may be unavailable.
+        if geo["cellid_computed"]:
+            columns = geo["coordinate_columns"]
+            state.log_activity(
+                self.name,
+                f"Computed cellid for {geo['georeferenced']} of "
+                f"{geo['georeferenced'] + geo['without_cellid']} accessions "
+                f"(columns {columns['latitude']}/{columns['longitude']})",
+            )
+        else:
+            state.log_activity(self.name, "No coordinate columns detected; cellid not computed")
 
     @staticmethod
     def _resolve_input_file(paths: SessionPaths, candidate: Path) -> Path | None:
@@ -399,6 +497,7 @@ class ListAccessionsSkill(Skill):
         text: str | None,
         historic: bool | None,
         max_records: int | None,
+        coordinate_hint: tuple[str | None, str | None] = (None, None),
     ) -> dict[str, Any]:
         """Load accessions from Genesys PGR using structured criteria.
 
@@ -414,6 +513,7 @@ class ListAccessionsSkill(Skill):
             text: Free-text keywords.
             historic: Restrict to historical records.
             max_records: Download cap.
+            coordinate_hint: Latitude/longitude columns given by the model (rarely needed).
 
         Returns:
             Tool result with the shape of the loaded table.
@@ -509,10 +609,13 @@ class ListAccessionsSkill(Skill):
             logger.error("Genesys request failed: %s", exc)
             return self.error(f"Genesys returned an error for this search: {exc}")
 
+        dataframe, geo = self._attach_cellid(dataframe, coordinate_hint)
+
         replaced = state.has_data
         state.set_original_list(dataframe, SourceMode.GENESYS)
         state.extras["genesys_filter"] = body
         state.extras["genesys_total_matching"] = total
+        state.extras["coordinate_columns"] = geo["coordinate_columns"]
 
         loaded = len(dataframe)
         truncated = loaded < total
@@ -527,11 +630,12 @@ class ListAccessionsSkill(Skill):
             description += ", replacing the previous Original and Candidate lists"
 
         state.log_activity(self.name, description)
+        self._log_cellid(state, geo)
 
         columns = [str(column) for column in dataframe.columns]
 
         return self.ok(
-            f"{description}. Passport data columns follow the MCPD standard. " + " ".join(notes),
+            f"{description}. Passport data columns follow the MCPD standard. {geo['message']} " + " ".join(notes),
             mode=SourceMode.GENESYS.value,
             accessions=loaded,
             total_matching=total,
@@ -541,6 +645,6 @@ class ListAccessionsSkill(Skill):
             unresolved_crops=unresolved_crops,
             columns=columns[:_MAX_COLUMNS_IN_RESULT],
             total_columns=len(columns),
-            coordinate_columns=detect_coordinate_columns(columns),
             replaced_previous_lists=replaced,
+            **{key: value for key, value in geo.items() if key != "message"},
         )

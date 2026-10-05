@@ -47,11 +47,20 @@ with SubsettingClient.from_settings(settings) as client:
 
 `compute_cellid(lat, lon, grid)` reproduces `raster::cellFromXY` (the function
 used by the data pipeline): ids are 1-based, numbered row by row from the
-north-west corner; row 1 touches `ymax = ymin + nrows * cellsize` (50°).
+north-west corner; row 1 touches `ymax = ymin + nrows * cellsize`.
 Coordinates outside the extent, missing or non-numeric return `None`.
+
+The indicator database is indexed by the **global** 0.05° raster
+(`raster_base_complete`: 7200 × 3600 cells, −180..180 / −90..90), which is the
+default of `SUBSETTING_GRID_*`. It was confirmed against the sandbox with
+`scripts/subsetting_cellid_probe.py` (the 7198 × 2000 / −50 raster shipped in
+the source repository does not index the data). Example: (11.39, −72.22) →
+`11320556`.
 
 ## Errors
 
+`SubsettingNoDataError` (no indicator data for the cells: indicator values only
+exist for cells that hold accessions; arbitrary coordinates return nothing),
 `SubsettingAuthError` (every credential rejected), `SubsettingRequestError`
 (other HTTP errors with `status_code`/`body`), `SubsettingConnectionError`
 (network/timeouts), `SubsettingError` (invalid arguments, unknown indicator or
@@ -61,6 +70,9 @@ period, empty analysis). Transient errors (429/5xx/network) are retried.
 
 ```bash
 uv run python scripts/subsetting_smoke.py --list-indicators
-uv run python scripts/subsetting_smoke.py --data --indicators cdd t_rain --coords 3.5,-76.35 4.7,-74.1
-uv run python scripts/subsetting_smoke.py --cluster --indicators cdd t_rain --coords 3.5,-76.35 4.7,-74.1 -12.0,-77.0 19.4,-99.1
+# coordinates of real accessions (indicator data only exists where accessions are)
+uv run python scripts/subsetting_smoke.py --data --indicators CDD t_rain --from-genesys --genus Phaseolus --species vulgaris --country COL --institute COL003 --limit 30
+uv run python scripts/subsetting_smoke.py --cluster --indicators CDD t_rain --from-genesys --genus Phaseolus --species vulgaris --country COL --institute COL003 --limit 30
+# explicit pairs (quote the string; negatives are fine)
+uv run python scripts/subsetting_smoke.py --data --indicators CDD --coords "3.5,-76.35 -12.0,-77.0"
 ```

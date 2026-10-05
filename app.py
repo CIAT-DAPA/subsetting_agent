@@ -181,7 +181,7 @@ async def chat(
 app = gr.ChatInterface(
     fn=chat,
     multimodal=True,
-    title="SubsettingAgent",
+    title="Subsetting Agent",
     description=(
         "Assistant that builds subsets of germplasm accessions combining passport data, "
         "traits, climate indicators and research papers. "

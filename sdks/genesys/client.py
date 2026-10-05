@@ -30,6 +30,7 @@ from sdks.genesys.errors import (
     GenesysRequestError,
 )
 from sdks.genesys.models import AccessionFilter, AccessionPage, AccessionRecord, Crop
+from sdks.genesys.traits import TraitsMixin
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type hints only
     from core.config import Settings
@@ -48,8 +49,12 @@ MAX_PAGE_SIZE = 1000
 _RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
-class GenesysClient:
-    """Synchronous client for the Genesys API built on ``httpx``."""
+class GenesysClient(TraitsMixin):
+    """Synchronous client for the Genesys API built on ``httpx``.
+
+    Accession listing and the crop catalogue live here; trait/dataset endpoints
+    come from :class:`~sdks.genesys.traits.TraitsMixin`.
+    """
 
     def __init__(
         self,

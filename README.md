@@ -18,6 +18,8 @@ skills/
   <skill_name>/         One folder per skill: SKILL.md + skill.py
   list_accessions/      Load the first list (local Excel/CSV, or Genesys PGR with structured criteria)
   passport_filter/      Filter / describe / reset the Candidate list by passport columns
+  climate_analysis/     list_indicators / filter / cluster by climate indicators (Subsetting API)
+  traits_analysis/      detect / fetch (Genesys datasets) / group by trait data -> cluster_traits
   export_list/          Export Candidate or Original list as CSV (attached to the chat)
   arguments.py          Tolerant parsing of tool arguments (lists, ints, bools, JSON text)
 core/
@@ -27,10 +29,11 @@ core/
   formatter.py          Activity summary + 15-row preview + CSV exports
   logger.py             Logging setup
 sdks/
-  genesys/              Genesys PGR client (POST /api/v2/acn/list, AccessionFilter) - see sdks/genesys/README.md
+  genesys/              Genesys PGR client (accession listing, crops, datasets/descriptors/observations) - see sdks/genesys/README.md
   subsetting/           Subsetting API client (indicators, indicator data, clusters, cellid) - see sdks/subsetting/README.md
 scripts/
   genesys_smoke.py      Manual check of the Genesys SDK against the real API
+  genesys_traits_smoke.py  Manual check of the Genesys trait/dataset endpoints (prints raw rows)
   subsetting_smoke.py   Manual check of the Subsetting SDK against the real API
 tests/                  pytest suite
 ```

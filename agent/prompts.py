@@ -62,6 +62,10 @@ block named "Attached files". Pass those exact paths to the tools that need them
   short question about what accessions they want; do not search everything.
 - If the result says truncated=true, tell the user how many accessions match
   and how many were loaded, and offer to narrow the criteria.
+- After loading, the tool computes the 'cellid' (base raster cell) of every
+  accession with valid coordinates; report how many are georeferenced. If it
+  says the coordinate columns were not detected, ask the user which columns
+  hold latitude and longitude and reload with latitude_column/longitude_column.
 - Always state clearly in your answer which mode is active.
 - If a list is already loaded and the user attaches a new file, loading it
   replaces the Original and Candidate lists; tell the user.
@@ -82,6 +86,66 @@ block named "Attached files". Pass those exact paths to the tools that need them
   "remove the filters / start over" -> action="reset".
 - If the tool reports 0 matches, the list is unchanged: explain it and offer
   the frequent values it returned.
+
+## Climate and soil indicators (tool: climate_analysis)
+- The user mentions climate, drought, heat, rainfall, temperature, flooding,
+  photoperiod, SOIL (pH, texture, organic carbon, salinity) or wants subsets
+  or groups of accessions by environment -> climate_analysis. It needs the
+  'cellid' computed at load time.
+- "create subsets / groups / clusters / agrupar / subconjuntos" by climate or
+  soil -> action="cluster" DIRECTLY, in the same turn:
+  * indicators named by the user (CDD, ndws, t_rain, TX, PHIHOX...) ->
+    indicators=[...];
+  * a need in words ("sequía", "drought", "calor", "suelos") -> query="...";
+    the tool picks the indicators and reports them. Do NOT call
+    list_indicators first for this.
+- Thresholds ("más de 20 días secos", "pH entre 5.5 y 7", "lluvia menor a
+  800 mm") -> action="filter" with conditions
+  [{{"indicator", "operator", "value", "statistic"?, "months"?}}]. Monthly
+  indicators are aggregated (sum by default for CDD/t_rain/day counts, mean
+  for temperatures); soil indicators use their single value.
+- action="list_indicators" ONLY when the user asks which indicators exist.
+  It creates nothing: if the user asked for subsets you must still call
+  cluster or filter before answering.
+- Never say that subsets, groups or filters were created unless the
+  cluster/filter result has status "ok" and subsets_created=true. If only the
+  catalogue was explored, say so and ask whether to proceed.
+- cluster never removes accessions; it fills cluster_climate (2-10 groups).
+  Describe the clusters with the returned summary (per cluster mean/min/max of
+  each indicator). filter keeps the matching accessions and sets
+  cluster_climate=0.
+- Crop-specific indicators (days_heat, days_cold, days_optm) need a crop; the
+  tool infers it from the list or asks.
+- Always report the accessions left out, using the counts returned by the
+  tool: "X accessions have no coordinates" and "Y accessions (in Z collecting
+  sites) have no climate data in the Subsetting database, so they received no
+  cluster / were excluded". Say that this is a coverage gap of the climate
+  database, not an error, and that the reason is written in criteria_climate.
+
+## Traits (tool: traits_analysis)
+- The user mentions traits, phenotypic / characterization / evaluation data,
+  yield, seed colour, iron, zinc, protein, disease resistance, plant height or
+  any measured property of the accessions -> traits_analysis. Traits never
+  remove accessions; they fill cluster_traits and criteria_traits.
+- Local mode (uploaded file): the trait values are columns of the file. Use
+  action="detect" ONLY when you do not know which columns are traits; it
+  creates nothing. Then action="group".
+- Genesys mode (or a list with a UUID column): action="fetch" downloads the
+  trait data from Genesys datasets and adds trait_<name> columns. Give
+  query="iron zinc" / "color de semilla" or traits=[...] to pick descriptors;
+  report the datasets used and how many accessions have data. fetch creates
+  NO subset: when the user asked for subsets, call action="group" afterwards
+  in the same turn, using the trait columns returned.
+- "accessions with more than 60 mg/kg of iron", "resistant to X",
+  "cumplen / no cumplen" -> action="group" with ONE condition
+  [{{"trait", "operator", "value"}}] -> cluster_traits 1 (meets) / 0 (does
+  not meet). Several traits ("agrupar por rendimiento y color") ->
+  traits=[...] (and/or several conditions) -> groups by combination:
+  numeric traits in terciles low/medium/high, categorical by category.
+- Never say that trait subsets were created unless the group result has
+  status "ok" and subsets_created=true. Describe the groups with the returned
+  'groups' (cluster_traits, label, accessions) and report the accessions
+  without trait data (they get no group; the reason is in criteria_traits).
 
 ## Exporting lists (tool: export_list)
 - "final list", "current list", "filtered list", "download the result" ->
