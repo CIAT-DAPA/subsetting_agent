@@ -27,10 +27,14 @@ class GridSettings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
     )
 
-    subsetting_grid_ncols: int = 7198
-    subsetting_grid_nrows: int = 2000
+    # Global 0.05 degree raster (-180..180, -90..90) that indexes the indicator
+    # database (raster_base_complete). Verified against the Subsetting API with
+    # scripts/subsetting_cellid_probe.py; the 7198x2000 raster of the source
+    # repository is NOT the one the data uses.
+    subsetting_grid_ncols: int = 7200
+    subsetting_grid_nrows: int = 3600
     subsetting_grid_xmin: float = -180.0
-    subsetting_grid_ymin: float = -50.0
+    subsetting_grid_ymin: float = -90.0
     subsetting_grid_cellsize: float = 0.05
 
 

@@ -6,6 +6,7 @@ from sdks.subsetting.errors import (
     SubsettingAuthError,
     SubsettingConnectionError,
     SubsettingError,
+    SubsettingNoDataError,
     SubsettingRequestError,
 )
 from sdks.subsetting.grid import add_cellid_column, compute_cellid
@@ -17,6 +18,7 @@ __all__ = [
     "SubsettingAuthError",
     "SubsettingConnectionError",
     "SubsettingError",
+    "SubsettingNoDataError",
     "SubsettingRequestError",
     "add_cellid_column",
     "compute_cellid",

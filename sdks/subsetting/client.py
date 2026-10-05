@@ -26,6 +26,7 @@ from sdks.subsetting.errors import (
     SubsettingAuthError,
     SubsettingConnectionError,
     SubsettingError,
+    SubsettingNoDataError,
     SubsettingRequestError,
 )
 from sdks.subsetting.models import MONTH_COLUMNS, ClusterResult, Indicator, IndicatorPeriod
@@ -177,16 +178,66 @@ class SubsettingClient:
         """
         return [indicator for indicator in self.list_indicators() if indicator.matches(query)]
 
-    def get_indicator(self, identifier: str) -> Indicator | None:
-        """Return the indicator whose id, prefix or name equals ``identifier``."""
-        needle = identifier.strip().lower()
+    def get_indicator(self, identifier: str, crop: str | None = None) -> Indicator | None:
+        """Return the indicator whose id, prefix or name equals ``identifier``.
 
-        # Exact match on id, prefix or name (case-insensitive).
-        for indicator in self.list_indicators():
-            if needle in (indicator.id.lower(), indicator.pref.lower(), indicator.name.lower()):
+        Crop-specific indicators share their prefix and name across crops
+        (``days_heat`` exists for Beans, Maize, Rice...). When several match,
+        the one whose crop equals ``crop`` wins; otherwise the generic (``NC``)
+        one, if any; otherwise the first match.
+
+        Args:
+            identifier: Indicator id, prefix or name (case-insensitive).
+            crop: Crop name used to disambiguate crop-specific indicators.
+
+        Returns:
+            The indicator, or ``None`` when nothing matches.
+        """
+        matches = self.get_indicator_variants(identifier)
+
+        # No match at all.
+        if not matches:
+            return None
+
+        # A single match needs no disambiguation.
+        if len(matches) == 1:
+            return matches[0]
+
+        wanted = (crop or "").strip().lower()
+
+        # Prefer the variant computed for the requested crop.
+        for indicator in matches:
+            if wanted and (indicator.crop or "").strip().lower() == wanted:
                 return indicator
 
-        return None
+        # Then the generic variant.
+        for indicator in matches:
+            if (indicator.crop or "").strip().upper() == "NC":
+                return indicator
+
+        return matches[0]
+
+    def get_indicator_variants(self, identifier: str) -> list[Indicator]:
+        """Return every indicator whose id, prefix or name equals ``identifier``.
+
+        Args:
+            identifier: Indicator id, prefix or name (case-insensitive).
+
+        Returns:
+            Matching indicators (one per crop for crop-specific indicators).
+        """
+        needle = identifier.strip().lower()
+
+        return [
+            indicator
+            for indicator in self.list_indicators()
+            if needle in (indicator.id.lower(), indicator.pref.lower(), indicator.name.lower())
+        ]
+
+    def catalogue_crops(self) -> list[str]:
+        """Return the crop names present in the indicator catalogue (excluding ``NC``)."""
+        crops = {indicator.crop for indicator in self.list_indicators() if indicator.crop}
+        return sorted(crop for crop in crops if crop.strip().upper() != "NC")
 
     def resolve_periods(self, indicator_ids: list[str], period: str | None = None) -> dict[str, list[str]]:
         """Map indicator ids to the period ids expected by the data endpoints.
@@ -339,9 +390,9 @@ class SubsettingClient:
 
         # An empty analysis means the cells had no indicator data.
         if not result.assignments:
-            raise SubsettingError(
+            raise SubsettingNoDataError(
                 "The Subsetting API returned no clusters: the selected cells have no data for the "
-                "chosen indicators."
+                "chosen indicators (indicator values only exist for cells that hold accessions)."
             )
 
         logger.info(
@@ -396,6 +447,14 @@ class SubsettingClient:
                     "same environment (sandbox vs production)."
                 )
 
+            # The indicators-data endpoint crashes (500, KeyError 'cellid') when no
+            # cell has data: that is a data condition, not a transient failure.
+            if response.status_code == 500 and path == INDICATORS_DATA_PATH and self._looks_like_no_data(response.text):
+                raise SubsettingNoDataError(
+                    "The Subsetting API has no indicator data for the given cells and indicators "
+                    "(indicator values only exist for cells that hold accessions)."
+                )
+
             # Transient server-side problems are retried.
             if response.status_code in _RETRY_STATUSES:
                 last_error = SubsettingRequestError(
@@ -441,6 +500,24 @@ class SubsettingClient:
         # Set the cookies of the active scheme.
         for name, value in wanted.items():
             self._http.cookies.set(name, value)
+
+    @staticmethod
+    def _looks_like_no_data(body: str) -> bool:
+        """Whether a 500 body corresponds to the empty-DataFrame crash of the API.
+
+        Args:
+            body: Raw response body (Flask HTML/traceback or plain text).
+
+        Returns:
+            ``True`` for the known signatures, and also for bodies without any
+            detail (the production server hides tracebacks), since the only
+            known cause of a 500 on this endpoint is the absence of data.
+        """
+        text = (body or "").lower()
+        signatures = ("keyerror", "'cellid'", "internal server error", "groupby")
+
+        # Empty or generic bodies cannot be distinguished from the no-data case.
+        return not text.strip() or any(signature in text for signature in signatures)
 
     def _sleep_backoff(self, attempt: int, retry_after: str | None = None) -> None:
         """Pause before the next retry (no pause after the last attempt)."""

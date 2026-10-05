@@ -32,3 +32,7 @@ class SubsettingRequestError(SubsettingError):
 
 class SubsettingConnectionError(SubsettingError):
     """The API could not be reached (network error or timeout)."""
+
+
+class SubsettingNoDataError(SubsettingError):
+    """The API holds no indicator data for the requested cells/indicators."""

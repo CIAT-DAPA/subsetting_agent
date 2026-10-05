@@ -12,12 +12,26 @@ lists defined by the business rules:
 
 | Situation | Arguments |
 |-----------|-----------|
-| The user attached an Excel/CSV file (its path appears in the *Attached files* block) | `source="local"`, `file_path=<attached path>`, optional `sheet_name` |
+| The user attached an Excel/CSV file (its path appears in the *Attached files* block) | `source="local"`, `file_path=<attached path>`, optional `sheet_name`, `latitude_column`, `longitude_column` |
 | The user gives no file and describes accessions (crop, genus/species, country, institute, biological status, accession numbers, keywords) | `source="genesys"` + the matching criteria (at least one) |
 | The user attaches a new file or asks for a new Genesys search after a list is already loaded | Call it again: the previous lists are **replaced** and the activity log says so |
 
 Do **not** call it for greetings, questions about capabilities or when the user
 only wants to filter a list that is already loaded.
+
+## Cell id (computed at load time, both modes)
+
+Right after loading, the tool detects the latitude/longitude columns
+(`DECLATITUDE`/`DECLONGITUDE`, `latitude`/`longitude`, `lat`/`lon`...) and adds a
+`cellid` column to **both** the Original and the Candidate lists: the 1-based
+cell of the base raster (7198 x 2000 cells of 0.05°, from `.env`) used by the
+climate indicators. Accessions without valid coordinates or outside the raster
+get an empty `cellid`. The result reports `cellid_computed`, `georeferenced`
+and `without_cellid`; mention those numbers to the user.
+
+If the coordinate columns are not detected (`cellid_computed=false`), ask the
+user which columns hold latitude and longitude and call the tool again with
+`latitude_column` / `longitude_column`. Climate tools need the `cellid`.
 
 ## Local mode
 
@@ -83,6 +97,9 @@ loaded: tell the user and offer to narrow the criteria.
   "columns": ["INSTCODE", "ACCENUMB", "GENUS", "SPECIES", "ORIGCTY", "..."],
   "total_columns": 49,
   "coordinate_columns": {"latitude": "DECLATITUDE", "longitude": "DECLONGITUDE"},
+  "cellid_computed": true,
+  "georeferenced": 4812,
+  "without_cellid": 188,
   "notes": [],
   "unresolved_crops": [],
   "replaced_previous_lists": false
