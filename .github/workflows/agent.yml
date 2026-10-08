@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-groups
 
+      - name: Run tests
+        run: uv run --group dev pytest
+
 
   MergeMainAgent:
     needs: TestAgent
@@ -56,22 +59,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Build package
-        run: uv build
-
+      # The project is an application (no wheel is built): the release ships the source tree.
       - name: Zip source artifact
-        run: zip -r agent.zip src pyproject.toml README.md uv.lock tests examples
+        run: zip -r agent.zip app.py agent core skills sdks scripts tests pyproject.toml uv.lock README.md .env.example -x "*/__pycache__/*"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: agent
-          path: |
-            dist/*
-            agent.zip
+          path: agent.zip
 
       - name: Generate tag name for release
         id: taggerDryRun
@@ -100,7 +96,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.taggerDryRun.outputs.new_tag }}
-          files: |
-            dist/*.whl
-            dist/*.tar.gz
-            agent.zip
+          files: agent.zip
