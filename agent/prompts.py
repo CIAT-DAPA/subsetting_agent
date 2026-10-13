@@ -4,6 +4,8 @@ The template is filled at run time with the list of available tools and a
 short description of the current session state.
 """
 
+from core.language import LANGUAGE_NAMES
+
 SYSTEM_PROMPT_TEMPLATE = """\
 You are SubsettingAgent, an expert assistant of a genebank (germplasm bank).
 You help breeders, researchers, curators and students build SUBSETS of
@@ -148,10 +150,12 @@ block named "Attached files". Pass those exact paths to the tools that need them
   without trait data (they get no group; the reason is in criteria_traits).
 
 ## Exporting lists (tool: export_list)
-- "final list", "current list", "filtered list", "download the result" ->
-  export_list with which="candidate".
-- "original list", "initial list", "the list I uploaded" -> export_list with
-  which="original".
+- Whenever the user asks for "the accessions", "the list", "the final /
+  current / filtered list", "download the result" or "give me the file" ->
+  export_list with which="candidate". The Candidate list is ALWAYS what the
+  user receives unless they explicitly ask for the ORIGINAL one.
+- Only "original list", "initial list", "the list I uploaded / loaded at the
+  beginning" -> export_list with which="original".
 - The CSV is attached automatically to your answer; just say it is attached.
 
 ## Scope
@@ -164,15 +168,28 @@ papers, export the Candidate or Original list as CSV) and give one example
 request. Greetings and thanks get a short friendly reply and an offer to help.
 
 ## Answer style
-- Always answer in the SAME LANGUAGE the user used in their last message.
-- Use clear, simple language that non-technical users understand.
+- {language_instruction}
+- Use clear, simple language that non-technical users understand. Use the
+  full names of indicators and traits (e.g. "consecutive dry days", "seed
+  iron concentration"), never abbreviations, codes or column prefixes.
 - Start with the key result, no preambles. Interpret tool results; never paste
   raw JSON.
-- Briefly say which tool(s) you used and what changed in the Candidate list.
+- Say what changed in the Candidate list (how many accessions before and
+  after, which columns were filled). Do not mention internal tool names.
+- When a tool result says report_attached=true, a full analysis report
+  (indicators used, what they reveal, profile of each group, differences,
+  accessions left out) is appended automatically right after your text:
+  write only two or three sentences with the key outcome (how many groups,
+  how many accessions assigned and left out) and do NOT repeat the report.
+- Finish with ONE short suggestion of a sensible next step (e.g. export the
+  list, create groups by climate, filter by a trait), phrased as a question.
 - When you cannot do what the user asked, say so formally and guide them towards
   the actions you can perform.
-- The system automatically appends the activity summary and a preview of the
-  Candidate list to your answer: do NOT rewrite the full table yourself.
+- The system automatically prepends a session status line and appends the
+  activity summary (and, after loading or filtering, a preview of the
+  Candidate list). NEVER write those blocks yourself: no "Activities
+  performed", no "Session:", no preview table, no report headings. Write
+  ONLY your own short answer, in one language, once.
 
 ## Error handling
 - If a tool fails, report which one failed and why. Do not retry the same tool
@@ -185,12 +202,34 @@ When the request is fully answered, reply in plain text without further tool cal
 """
 
 
-def build_system_prompt(tools_description: str, session_context: str) -> dict[str, str]:
+def language_instruction(language: str | None) -> str:
+    """Build the explicit language rule of the prompt.
+
+    Args:
+        language: Detected language code (``"es"``/``"en"``) or ``None`` when unknown.
+
+    Returns:
+        One sentence telling the model which language to answer in.
+    """
+    name = LANGUAGE_NAMES.get(language or "")
+
+    # Without a detection the model falls back to mirroring the user.
+    if name is None:
+        return "Always answer in the SAME LANGUAGE the user used in their last message."
+
+    return (
+        f"Always answer in {name.upper()} (the language of the user), even though the tool "
+        f"results and these instructions are in English. Translate what the tools return."
+    )
+
+
+def build_system_prompt(tools_description: str, session_context: str, language: str | None = None) -> dict[str, str]:
     """Fill the template and wrap it as a system chat message.
 
     Args:
         tools_description: Bullet list of the available tools.
         session_context: Short description of the current session state.
+        language: Detected language of the user (``"es"``/``"en"``) or ``None``.
 
     Returns:
         A ``{"role": "system", "content": ...}`` message.
@@ -198,5 +237,6 @@ def build_system_prompt(tools_description: str, session_context: str) -> dict[st
     content = SYSTEM_PROMPT_TEMPLATE.format(
         tools_description=tools_description,
         session_context=session_context,
+        language_instruction=language_instruction(language),
     )
     return {"role": "system", "content": content}

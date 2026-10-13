@@ -197,6 +197,7 @@ class PassportFilterSkill(Skill):
         filtered = candidate.loc[mask].copy()
         filtered[CRITERIA_COLUMN] = self._append_criteria(filtered[CRITERIA_COLUMN], criteria_text)
         state.update_candidate_list(filtered)
+        state.mark_event("filtered")
 
         description = f"Filtered Candidate list by passport data '{criteria_text}': {before} -> {after} accessions"
         state.log_activity(self.name, description)

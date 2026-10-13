@@ -99,8 +99,9 @@ def test_formatter_builds_preview_and_exports(
     response = formatter.build_response("Done.", state)
 
     assert "Activities performed so far" in response
-    assert "Candidate list preview" in response
+    assert "Candidate list preview" in response  # a list was just loaded in this turn
     assert "G1" in response
+    assert response.startswith("**Session:** 3 accessions")
 
     candidate_csv = formatter.export_candidate_list(state, paths)
     original_csv = formatter.export_original_list(state, paths)
@@ -122,3 +123,100 @@ def test_registry_is_usable_before_discovery() -> None:
 
     assert len(registry) > 0
     assert "no tools" not in registry.describe()
+
+
+# ----------------------------------------------------------- response layout
+def test_detect_language() -> None:
+    """Spanish and English messages are recognised; empty text keeps the default."""
+    from core.language import detect_language
+
+    assert detect_language("Busca en Genesys los frijoles de Colombia") == "es"
+    assert detect_language("Find the bean accessions from Colombia") == "en"
+    assert detect_language("", default="es") == "es"
+    assert detect_language("G1234") is None
+
+
+def test_preview_only_after_load_or_filter(sample_dataframe: pd.DataFrame) -> None:
+    """The preview is shown when a list is loaded or filtered, not after other actions."""
+    state = SessionState(session_id="s1")
+    formatter = ResponseFormatter(preview_rows=15)
+
+    # Nothing loaded: status line says so, no preview.
+    assert "no accession list loaded" in formatter.build_response("Hi", state)
+
+    state.begin_turn()
+    state.set_original_list(sample_dataframe, SourceMode.LOCAL)
+    assert state.show_preview and "Candidate list preview" in formatter.build_response("Loaded.", state)
+
+    # Next turn with an annotation (cluster-like) action: no preview.
+    state.begin_turn()
+    state.log_activity("climate_analysis", "Clustered")
+    response = formatter.build_response("Clustered.", state)
+    assert "Candidate list preview" not in response and "Activities performed so far" in response
+    assert "**3** in the Candidate list" in response
+
+    # Filtering shows it again; reset as well.
+    state.begin_turn()
+    state.mark_event("filtered")
+    assert "Candidate list preview" in formatter.build_response("Filtered.", state)
+    state.begin_turn()
+    state.reset_candidate_list()
+    assert state.show_preview
+
+
+def test_fixed_blocks_follow_the_user_language(sample_dataframe: pd.DataFrame) -> None:
+    """Status, activity and preview headers are rendered in Spanish when the user writes Spanish."""
+    state = SessionState(session_id="s1")
+    state.language = "es"
+    state.set_original_list(sample_dataframe, SourceMode.GENESYS)
+    state.log_activity("list_accessions", "Cargadas 3 accesiones")
+    response = ResponseFormatter().build_response("Listo.", state)
+
+    assert "Sesión:" in response and "modo Genesys" in response
+    assert "Actividades realizadas hasta ahora" in response
+    assert "Vista previa de la lista candidata" in response
+
+
+def test_preview_columns_prioritise_ids_and_filled_annotations() -> None:
+    """Identification columns first, filled criteria/cluster columns next, empty columns hidden."""
+    frame = pd.DataFrame({
+        "extra": ["x", "y"], "ORIGCTY": ["COL", "PER"], "ACCENUMB": ["G1", "G2"], "empty": [None, None],
+    })
+    state = SessionState(session_id="s1")
+    state.set_original_list(frame, SourceMode.LOCAL)
+    state.candidate_list["cluster_climate"] = [1, 2]
+
+    columns = ResponseFormatter.select_preview_columns(state.candidate_list)
+    assert columns[:2] == ["ACCENUMB", "ORIGCTY"]
+    assert columns[2] == "cluster_climate" and "extra" in columns
+    assert "empty" not in columns and "criteria_passport" not in columns
+
+
+def test_export_defaults_to_candidate_and_prompt_language(tmp_path: Path, sample_dataframe: pd.DataFrame) -> None:
+    """export_list without 'which' exports the Candidate list; the prompt names the user's language."""
+    from agent.prompts import build_system_prompt
+    from skills.export_list.skill import ExportListSkill
+
+    state = SessionState(session_id="s1")
+    state.set_original_list(sample_dataframe, SourceMode.LOCAL)
+    paths = SessionManager(tmp_path / "tmp").get_paths("s1")
+    result = ExportListSkill().run(state, paths)
+
+    assert result["status"] == "ok" and result["list"] == "candidate"
+
+    prompt = build_system_prompt("tools", "context", language="es")["content"]
+    assert "answer in SPANISH" in prompt
+    assert "SAME LANGUAGE" in build_system_prompt("tools", "context")["content"]
+
+
+def test_strip_system_blocks_and_raw_conversation(sample_dataframe: pd.DataFrame) -> None:
+    """Imitated system blocks are cut from the model text; the raw memory keeps only clean texts."""
+    from core.formatter import strip_system_blocks
+
+    text = "Listo, filtré la lista.\n\n---\n\n**Actividades realizadas hasta ahora:**\n\n1. algo\n\n**Vista previa de la lista candidata**"
+    assert strip_system_blocks(text) == "Listo, filtré la lista."
+    assert strip_system_blocks("Plain answer") == "Plain answer"
+
+    state = SessionState(session_id="s1")
+    state.remember_exchange("hola", "Hola, ¿qué necesitas?")
+    assert state.conversation == [{"role": "user", "content": "hola"}, {"role": "assistant", "content": "Hola, ¿qué necesitas?"}]

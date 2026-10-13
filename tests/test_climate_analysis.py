@@ -262,6 +262,7 @@ def test_cluster_assigns_clusters_and_keeps_rows(session) -> None:
     skill, client = make_skill()
     skill.run(state, paths, action="list_indicators", indicators=["CDD", "TX"])
 
+    state.begin_turn()  # the list was loaded in a previous turn
     result = skill.run(state, paths, action="cluster", months=[3, 8])
 
     assert result["status"] == "ok"
@@ -280,6 +281,15 @@ def test_cluster_assigns_clusters_and_keeps_rows(session) -> None:
     assert "without climate data" in state.activity_log[-1].description
     assert "cluster by CDD, TX (period mean, months 3-8) [CDD=5.00, TX=25.00]" in state.candidate_list["criteria_climate"].iloc[0]
     assert result["summary"][0]["indicator"] == "CDD"
+
+    # The report names the indicators in full, profiles every group and explains the gaps.
+    report = state.turn_report
+    assert report is not None and report.startswith("### Environmental clustering report")
+    assert "Consecutive dry days (days)" in report and "Average maximum temperature" in report
+    assert "Group 0 (2 accessions)" in report and "Group 1 (2 accessions)" in report
+    assert "longest run of consecutive days without rain" in report
+    assert "1 accessions have no coordinates" in report and "1 accessions (in 1 collecting sites)" in report
+    assert result["report_attached"] is True and not state.show_preview
 
     body = json.loads([r for r in client._http._transport.handler.requests if r.url.path.endswith("/cluster")][-1].content)  # type: ignore[attr-defined]
     assert body["analysis"]["hyperparameter"] == {"n_clusters": 10, "min_cluster": 2}
@@ -383,3 +393,12 @@ def test_filter_condition_without_indicator_uses_query(session) -> None:
     assert result["status"] == "ok"
     assert result["indicators"] == ["PHIHOX"]
     assert result["accessions_after"] == 2  # pH 6.5 and 6.0
+
+
+def test_cluster_attaches_report(tmp_path: Path) -> None:
+    """The cluster action produces a report with full indicator names, profiles and gaps."""
+    from skills.climate_analysis.report import interpret_indicator
+    from sdks.subsetting.models import Indicator as _Indicator
+
+    assert "consecutive days" in interpret_indicator(_Indicator(id="x", name="CDD", pref="CDD", indicator_type="generic"), "en")
+    assert "déficit hídrico" in interpret_indicator(_Indicator(id="x", name="Any", pref="zzz", indicator_type="generic", category="Drought stress"), "es")
