@@ -24,8 +24,9 @@ class ExportListSkill(Skill):
     name = "export_list"
     description = (
         "Export a list of the session as a CSV file that the user can download. "
-        "Use which='candidate' when the user asks for the final/current/filtered list "
-        "and which='original' when the user asks for the original/initial list."
+        "which='candidate' (default) whenever the user asks for the accessions, the list, the "
+        "final/current/filtered list; which='original' ONLY when the user explicitly asks for "
+        "the original/initial list."
     )
     parameters: dict[str, Any] = {
         "type": "object",
@@ -36,7 +37,7 @@ class ExportListSkill(Skill):
                 "description": "List to export: 'candidate' (working list) or 'original'.",
             }
         },
-        "required": ["which"],
+        "required": [],
     }
 
     def __init__(self) -> None:
@@ -61,7 +62,8 @@ class ExportListSkill(Skill):
         Returns:
             Tool result with the CSV path in ``output_files``.
         """
-        target = (which or "").strip().lower()
+        # The Candidate list is what the user receives unless the Original one is asked explicitly.
+        target = (which or "candidate").strip().lower() or "candidate"
 
         # Nothing can be exported before a list is loaded.
         if not state.has_data:

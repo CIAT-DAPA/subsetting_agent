@@ -321,3 +321,23 @@ def test_group_errors(paths) -> None:
     assert skill.run(state, paths, action="group")["status"] == "error"
     result = skill.run(state, paths, action="group", traits=["protein"])
     assert result["status"] == "error" and "not found" in result["message"]
+
+
+def test_group_attaches_report_in_user_language(paths) -> None:
+    """A Spanish report with the descriptor titles is produced after grouping."""
+    state = make_state(genesys_frame())
+    state.language = "es"
+    skill = make_skill()
+    skill.run(state, paths, action="fetch", query="iron zinc")
+    skill.run(state, paths, action="group", conditions=[{"trait": "Fe.Mean", "operator": "gte", "value": 60}])
+
+    report = state.turn_report
+    assert report is not None and report.startswith("### Informe de la agrupación por rasgos")
+    assert "Seed iron concentration (mg/kg)" in report and "Cultivo analizado: Phaseolus" in report
+    assert "Grupo 1 – cumple la condición (2 accesiones)" in report
+    assert "2 accesiones no tienen valores" in report
+
+    # Several traits -> tercile note, differences section.
+    state.begin_turn()
+    skill.run(state, paths, action="group", traits=["Fe.Mean", "Zn.Mean"])
+    assert "tres niveles" in state.turn_report and "Diferencias entre grupos" in state.turn_report

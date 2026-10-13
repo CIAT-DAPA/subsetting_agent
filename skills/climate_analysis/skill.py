@@ -23,6 +23,7 @@ from core.state import SessionState
 from sdks.subsetting import SubsettingAuthError, SubsettingClient, SubsettingConnectionError, SubsettingError, SubsettingNoDataError, SubsettingRequestError
 from skills.arguments import as_dict_list, as_int, as_list
 from skills.base import Skill
+from skills.climate_analysis.report import build_climate_report
 from skills.climate_analysis.engine import (
     ClimateError,
     ResolvedIndicator,
@@ -301,7 +302,7 @@ class ClimateAnalysisSkill(Skill):
             resolved = resolve_indicators(client, [str(item) for item in selected], self._resolve_crop(state, crop) if state.has_data else crop)
             state.climate_indicators = [item.indicator.id for item in resolved]
             remembered = [item.label for item in resolved]
-            state.log_activity(self.name, f"Selected climate indicators: {remembered}")
+            state.log_activity(self.name, f"Explored the climate catalogue and selected the indicators {remembered} (no subset created yet)")
 
         message = f"{len(catalogue)} indicator(s) in the catalogue" + (f" matching '{query}'" if query else "")
 
@@ -444,6 +445,7 @@ class ClimateAnalysisSkill(Skill):
         texts = filtered[CELLID_COLUMN].map(row_text)
         filtered[CRITERIA_COLUMN] = self._append_criteria(filtered[CRITERIA_COLUMN], texts)
         filtered[CLUSTER_COLUMN] = 0
+        state.mark_event("filtered")
         state.update_candidate_list(filtered)
         state.climate_indicators = [item.indicator.id for item in resolved]
 
@@ -570,6 +572,21 @@ class ClimateAnalysisSkill(Skill):
         without_data = int(no_data.sum())
         cells_without_data = int(cell_series[no_data].nunique())
 
+        # The report is built from the real results and appended to the answer by the formatter.
+        state.turn_report = build_climate_report(
+            language=state.language,
+            crop=crop_name,
+            indicators=[item.indicator for item in resolved],
+            candidate=candidate,
+            cluster_column=CLUSTER_COLUMN,
+            cellid_column=CELLID_COLUMN,
+            indicator_values=result.indicator_values,
+            without_cellid=without_cellid,
+            without_data=without_data,
+            cells_without_data=cells_without_data,
+            criteria_column=CRITERIA_COLUMN,
+        )
+
         description = (
             f"Clustered Candidate list by climate indicators {labels} into {result.cluster_count} clusters "
             f"(period {period or client.default_period}, months {window[0]}-{window[1]}); "
@@ -581,9 +598,11 @@ class ClimateAnalysisSkill(Skill):
         return self.ok(
             f"{description}.{selection_note} Cluster of each accession written in '{CLUSTER_COLUMN}'; "
             f"indicators and values in '{CRITERIA_COLUMN}'. Accessions without cluster have the reason "
-            f"written in '{CRITERIA_COLUMN}'. Tell the user explicitly that the Subsetting database has no "
-            "climate data for those collecting sites (it is a data coverage gap, not an error).",
+            f"written in '{CRITERIA_COLUMN}'. A full report of the clusters (indicators, group profiles, "
+            "differences, accessions left out) is appended automatically to your answer: summarise the "
+            "outcome in two or three sentences and do NOT repeat the report.",
             subsets_created=True,
+            report_attached=True,
             clusters=result.cluster_count,
             cluster_sizes=cluster_sizes,
             assigned=int(has_cluster.sum()),
