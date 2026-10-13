@@ -29,6 +29,7 @@ from sdks.genesys.traits import Descriptor
 from skills.arguments import as_dict_list, as_int, as_list
 from skills.base import Skill
 from skills.passport_filter.engine import OPERATORS, Condition, FilterError, evaluate_condition, normalise_operator
+from skills.traits_analysis.report import build_traits_report
 from skills.traits_analysis.engine import (
     TRAIT_PREFIX,
     TraitsError,
@@ -415,17 +416,42 @@ class TraitsAnalysisSkill(Skill):
         sizes = codes.dropna().astype(int).value_counts().sort_index()
         group_summary = [{"cluster_traits": int(code), "label": str(labels[codes == code].iloc[0]), "accessions": int(size)} for code, size in sizes.items()]
         assigned = int(codes.notna().sum())
+
+        # The report is built from the real results and appended to the answer by the formatter.
+        state.turn_report = build_traits_report(
+            language=state.language,
+            crop=self._crop_of(frame),
+            candidate=frame,
+            columns=columns,
+            cluster_column=CLUSTER_COLUMN,
+            criteria_column=CRITERIA_COLUMN,
+            descriptors=state.extras.get("trait_descriptors", {}),
+            conditions=list(flags),
+            binary=len(flags) == 1 and len(columns) == 1,
+        )
         state.log_activity(self.name, f"Trait subsets created ({description}): {len(sizes)} group(s), {assigned} accessions assigned, {len(frame) - assigned} without trait data")
 
         return self.ok(
             f"Trait subsets created: {len(sizes)} group(s) written to cluster_traits ({assigned} accessions assigned, "
-            f"{len(frame) - assigned} without trait data). No accession was removed.",
+            f"{len(frame) - assigned} without trait data). No accession was removed. A full report of the "
+            "groups is appended automatically to your answer: summarise the outcome in two or three "
+            "sentences and do NOT repeat the report.",
             groups=group_summary,
+            report_attached=True,
             assigned=assigned,
             without_data=len(frame) - assigned,
             columns=columns,
             subsets_created=True,
         )
+
+    @staticmethod
+    def _crop_of(frame: pd.DataFrame) -> str | None:
+        """Most frequent crop name (or genus) of the list, used in the report."""
+        for column in ("CROPNAME", "crop", "cultivo", "GENUS", "genus", "genero"):
+            if column in frame.columns and frame[column].notna().any():
+                return str(frame[column].dropna().astype(str).value_counts().index[0])
+
+        return None
 
     @staticmethod
     def _evaluate(frame: pd.DataFrame, condition: Condition) -> pd.Series:

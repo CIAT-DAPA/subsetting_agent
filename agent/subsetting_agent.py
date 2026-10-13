@@ -16,7 +16,8 @@ from litellm import acompletion
 from agent.prompts import build_system_prompt
 from agent.skill_registry import SkillRegistry
 from core.config import Settings
-from core.formatter import ResponseFormatter
+from core.formatter import ResponseFormatter, strip_system_blocks
+from core.language import detect_language
 from core.logger import get_logger
 from core.session import SessionManager
 from core.state import SessionState, SessionStore
@@ -125,7 +126,9 @@ class SubsettingAgent:
         Args:
             session_id: Identifier of the session (Gradio ``session_hash``).
             user_message: Text typed by the user.
-            history: Previous ``{"role", "content"}`` messages of the chat.
+            history: Previous messages of the chat as kept by the UI. Not sent to
+                the model (the session keeps its own raw conversation); accepted
+                for compatibility with the UI callback.
             uploaded_files: Files attached to this message, already stored in
                 the session ``inputs`` folder.
 
@@ -137,6 +140,10 @@ class SubsettingAgent:
         paths = self.session_manager.get_paths(session_id)
         uploaded_files = uploaded_files or []
 
+        # New turn: forget the layout events of the previous one and refresh the language.
+        state.begin_turn()
+        state.language = detect_language(user_message, default=state.language)
+
         # Remember every attached file so later turns can refer to it.
         for file_path in uploaded_files:
             state.register_uploaded_file(file_path)
@@ -147,14 +154,18 @@ class SubsettingAgent:
         if not message_text.strip():
             return AgentResponse(text="Please write a message or attach a file so I can help you.")
 
+        # The model only sees its own raw exchanges (never the formatted answers shown
+        # in the chat); the Gradio history is ignored on purpose to avoid the model
+        # copying the status/activities/preview blocks or switching language.
         memory: list[dict[str, Any]] = [
-            *history[-self.settings.agent_max_history_messages :],
+            *state.conversation[-self.settings.agent_max_history_messages :],
             {"role": "user", "content": message_text},
         ]
 
         system_prompt = build_system_prompt(
             tools_description=self.registry.describe(),
             session_context=state.summary_context(),
+            language=state.language,
         )
 
         generated_files: list[Path] = []
@@ -166,6 +177,9 @@ class SubsettingAgent:
             system_prompt=system_prompt,
             generated_files=generated_files,
         )
+
+        agent_text = strip_system_blocks(agent_text)
+        state.remember_exchange(message_text, agent_text)
 
         return AgentResponse(
             text=self.formatter.build_response(agent_text, state),

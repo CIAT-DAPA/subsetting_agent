@@ -74,6 +74,16 @@ class SessionState:
         uploaded_files: Files uploaded by the user during the session.
         activity_log: Ordered list of actions performed so far.
         extras: Free key/value store for skills that need extra memory.
+        language: Language of the user (``"es"``/``"en"``) detected from the messages.
+        turn_events: Events raised by the skills during the current turn
+            (``"loaded"``, ``"filtered"``); the formatter uses them to decide
+            whether the Candidate preview is shown. Cleared by ``begin_turn``.
+        turn_report: Markdown analysis report produced by a cluster/group skill
+            in the current turn; the formatter appends it to the answer.
+        conversation: Raw exchanges with the model (``{"role", "content"}``):
+            the user messages and the model's own final texts, WITHOUT the
+            blocks added by the formatter, so the model never sees (and never
+            copies) the status line, activity summary, report or preview.
     """
 
     session_id: str
@@ -84,6 +94,10 @@ class SessionState:
     uploaded_files: list[Path] = field(default_factory=list)
     activity_log: list[ActivityEntry] = field(default_factory=list)
     extras: dict[str, Any] = field(default_factory=dict)
+    language: str | None = None
+    turn_events: list[str] = field(default_factory=list)
+    turn_report: str | None = None
+    conversation: list[dict[str, str]] = field(default_factory=list)
 
     # ------------------------------------------------------------------ queries
     @property
@@ -125,6 +139,7 @@ class SessionState:
                 candidate[column] = pd.NA
 
         self.candidate_list = candidate.reset_index(drop=True)
+        self.mark_event("loaded")
 
         logger.info(
             "Session %s: original list set (%s rows, mode=%s)",
@@ -154,6 +169,7 @@ class SessionState:
                 candidate[column] = pd.NA
 
         self.candidate_list = candidate.reset_index(drop=True)
+        self.mark_event("filtered")
         logger.info("Session %s: candidate list reset (%s rows)", self.session_id, len(candidate))
 
     def update_candidate_list(self, dataframe: pd.DataFrame) -> None:
@@ -172,6 +188,35 @@ class SessionState:
             raise ValueError(f"Candidate list is missing mandatory columns: {missing}")
 
         self.candidate_list = dataframe.reset_index(drop=True)
+
+    def begin_turn(self) -> None:
+        """Forget the events and report of the previous turn (called once per user message)."""
+        self.turn_events = []
+        self.turn_report = None
+
+    def mark_event(self, event: str) -> None:
+        """Record that something relevant for the answer layout happened in this turn.
+
+        Args:
+            event: ``"loaded"`` (a list was loaded) or ``"filtered"`` (the Candidate list was narrowed or reset).
+        """
+        if event not in self.turn_events:
+            self.turn_events.append(event)
+
+    @property
+    def show_preview(self) -> bool:
+        """Whether the Candidate preview belongs in this turn's answer (only after loading or filtering)."""
+        return any(event in self.turn_events for event in ("loaded", "filtered"))
+
+    def remember_exchange(self, user_message: str, assistant_text: str) -> None:
+        """Store one user/assistant exchange in the raw conversation memory.
+
+        Args:
+            user_message: Text sent by the user (including the attached-files block).
+            assistant_text: Final text written by the model, before formatting.
+        """
+        self.conversation.append({"role": "user", "content": user_message})
+        self.conversation.append({"role": "assistant", "content": assistant_text})
 
     def log_activity(self, skill: str, description: str) -> None:
         """Append an entry to the activity log.
